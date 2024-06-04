@@ -30,6 +30,7 @@
 /* External globals  // these should be volatile as they are set in the int handler
    gcc7 8 appear to optimise all the code away if they are set to volatile */
 extern  bool debugFlag_filesystem;
+extern  bool debugFlag_extended_attributes;
 extern  bool debugFlag_scsiCommands;
 extern  bool debugFlag_scsiBlocks;
 extern  bool debugFlag_scsiFcodes;

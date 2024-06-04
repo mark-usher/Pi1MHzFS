@@ -40,6 +40,7 @@
 #ifdef DEBUG
    // Default debug settings for debug builds
     bool debugFlag_filesystem = true;
+    bool debugFlag_extended_attributes = true;
     bool debugFlag_scsiCommands = true;
     bool debugFlag_scsiBlocks = false;
     bool debugFlag_scsiFcodes = true;
@@ -48,6 +49,7 @@
 #else
    // Default debug settings for release builds
     bool debugFlag_filesystem = false;
+    bool debugFlag_extended_attributes = false;
     bool debugFlag_scsiCommands = false;
     bool debugFlag_scsiBlocks = false;
     bool debugFlag_scsiFcodes = false;
