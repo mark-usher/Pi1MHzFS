@@ -231,6 +231,9 @@ uint8_t getInquiryData(uint8_t bytesRequested, uint8_t *buf, uint8_t LUN) {
     else    
         sprintf((char*)buf+25,"BAD MB");
 
+    sprintf(msg, "ext_attributes: getInquiryData: buffer returned default data and contains:'%s'\r\n", buf);
+    debugString_P(PSTR(msg));
+
     // buffer updated - return
     return 0;
 
