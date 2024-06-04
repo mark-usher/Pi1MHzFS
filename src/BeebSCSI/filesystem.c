@@ -45,7 +45,7 @@
 
  Starting ADFS with F break now doesn't start any LUNs so SCSIJUKE can be the first command
 
- Fall back to slow seeking if the LUN us too fragmented instead of just failing over.
+ Fall back to slow seeking if the LUN is too fragmented instead of just failing over.
 
 */
 
@@ -55,6 +55,7 @@
 #include <string.h>
 
 #include "debug.h"
+#include "ext_attributes.h"
 #include "fatfs/ff.h"
 #include "filesystem.h"
 #include "../rpi/rpi.h"
@@ -72,9 +73,9 @@ NOINIT_SECTION static struct filesystemStateStruct
 
    bool fsMountState;      // File system mount state (true = mounted, false = dismounted)
 
-   uint8_t lunDirectory;   // Current LUN directory ID
-   bool fsLunStatus[MAX_LUNS]; // LUN image availability flags for the currently selected LUN directory (true = started, false = stopped)
-   uint8_t fsLunUserCode[MAX_LUNS][5];  // LUN 5-byte User code (used for F-Code interactions - only present for laser disc images)
+   uint8_t lunDirectory;               // Current LUN directory ID
+   bool fsLunStatus[MAX_LUNS];         // LUN image availability flags for the currently selected LUN directory (true = started, false = stopped)
+   uint8_t fsLunUserCode[MAX_LUNS][5]; // LUN 5-byte User code (used for F-Code interactions - only present for laser disc images)
 
 } filesystemState;
 
@@ -542,6 +543,30 @@ bool filesystemCheckLunImage(uint8_t lunNumber)
       filesystemGetUserCodeFromUcd(filesystemState.lunDirectory, lunNumber);
    }
 
+   // Check if the LUN extended attributes file (.ext) is present
+   sprintf(extAttributes_fileName, "/BeebSCSI%d/scsi%d.ext", filesystemState.lunDirectory, lunNumber);
+
+   if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckLunImage(): Checking for (.ext) LUN extended attributes file\r\n"));
+   fsResult = f_open(&fileObject, extAttributes_fileName, FA_READ);
+
+   if (fsResult != FR_OK) {
+      // LUN extended properties file is not found
+      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckLunImage(): LUN extended attributes file not found\r\n"));
+
+      // continue using values from .dsc file and other generic defaults
+      extAttributes =false;
+
+   } else {
+      // LUN extended attributes file is present
+      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckLunImage(): LUN extended attributes file found\r\n"));
+
+      // Read the extended attributes from the .ext file
+      extAttributes = true;
+
+      // Close the .ext file
+      f_close(&fileObject);
+   }
+
    // Exit with success
    if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckLunImage(): Successful\r\n"));
    return true;
@@ -711,7 +736,7 @@ void filesystemGetUserCodeFromUcd(uint8_t lunDirectoryNumber, uint8_t lunNumber)
 
    fsResult = f_open(&fileObject, fileName, FA_READ);
    if (fsResult == FR_OK) {
-      // Read the DSC data
+      // Read the UCD data
       fsResult = f_read(&fileObject, filesystemState.fsLunUserCode[lunNumber], 5, &fsCounter);
       f_close(&fileObject);
 
