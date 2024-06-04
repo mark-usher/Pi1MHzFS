@@ -67,7 +67,8 @@ set( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wconversion")
 
 set( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wdeprecated-declarations -Wfloat-equal -Wmissing-format-attribute " )
 
-set( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wswitch-enum -Wenum-int-mismatch -Wxor-used-as-pow -fstrict-flex-arrays -Warray-bounds=2")
+#set( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wswitch-enum -Wenum-int-mismatch -Wxor-used-as-pow -fstrict-flex-arrays -Warray-bounds=2")
+set( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wswitch-enum -Warray-bounds=2")
 
 set( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fanalyzer" )
 
@@ -115,6 +116,7 @@ file( GLOB harddisc_emulator_files
    BeebSCSI/debug.c
    BeebSCSI/filesystem.c
    BeebSCSI/scsi.c
+   BeebSCSI/ext_attributes.c
    BeebSCSI/fatfs/ff.c
    BeebSCSI/fatfs/diskio.c
    BeebSCSI/fatfs/ffunicode.c
