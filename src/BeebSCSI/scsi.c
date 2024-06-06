@@ -50,6 +50,30 @@
 #include "statusled.h"
 #include "scsi.h"
 
+typedef struct {
+	uint8_t  ModeDataLength;
+	uint8_t  MediumType;		
+	uint8_t  WriteProtect;
+   uint8_t  BlockDescriptorLength;
+} mode_parameter_header;
+
+typedef struct {
+   uint8_t  MSB;
+   uint8_t  CSB;
+   uint8_t  LSB;
+} uint3byte;
+
+typedef struct {
+   uint32_t  NumberOfBlocks;
+   uint8_t   Reserved;
+   uint3byte LogicalBlockLength;
+} LBA_short_block_descriptor;
+
+typedef struct {
+   uint8_t  PageCode;
+   uint8_t  PageLength;
+   uint8_t  PageData[];
+} modepage;
 
 // Mode Parameter Pages
 static const uint8_t ErrorCorrectionStatus[] =	// Page 1
@@ -156,36 +180,11 @@ static const uint8_t Manufacturer[] =	         // Page 33
 0x00,
 0x00,				// Reserved
 0x00, 0x01, 0x00,	// Logical Block Length (256)
-	// Mode Page - Manufacturer Parameters
+	// Mode Page - Manufacture Parameters
 0x21,				// Page Code	
 0x06,				// Page Length (6)
-0x59, 0x0B, 0x1B,	// Manufacturer Date and Build Level (6 bytes)
+0x59, 0x0B, 0x1B,	// Manufacture Date and Build Level (6 bytes)
 0x00, 0x00, 0x00
-};
-static const uint8_t Descriptor[] =	            // Page 34
-// not used - the contents of the .dsc file should be the same
-{
-	// Mode Parameter Header
-0x18,				// Mode Data Length (24)
-0x00,				// Medium Type
-0x00,				// Write Protect bit/Resvd/DPOFUA/Resvd
-0x08,				// Block Descriptor Length (8)
-	// (Short LBA) Block Descriptor
-0x00, 0x00, 0x00,	// Number of Blocks
-0x00,
-0x00,				// Reserved
-0x00, 0x01, 0x00,	// Logical Block Length (256)
-	// Mode Page - Descriptor Parameters
-0x22,				// Page Code
-0x0B,				// Page Length (11)
-0x01, 0x32,			// Cylinder Count (MSB, LSB)
-0x04,				// Data Head Count
-0x00, 0x80,			// Reduced Write Current Cylinder (MSB, LSB)
-0x00, 0x80,			// Write Pre-compensation Cylinder (MSB, LSB)
-0x00,				// Landing Zone Position
-0x01,				// Step Pulse Output Rate Code
-0x00,				// Removable Drive Parameters
-0x00				// Sectors per Track
 };
 static const uint8_t SystemFlags[] =            // Page 35
 {
@@ -1889,34 +1888,6 @@ static uint8_t scsiCommandModeSense(void)
 
 		for (byteCounter = 0; byteCounter < length; byteCounter++)
 			hostadapterWriteByte(Manufacturer[byteCounter]);
-
-		// Indicate successful command in status and message
-		commandDataBlock.status = 0x00; // 0x00 = Good
-		break;
-
-//==============================================================================
-
-		case 34:	// Descriptor Parameters Page
-
-		length = Descriptor[0] + 1;											// send whole page unless Allocation Length is smaller
-		if (commandDataBlock.data[4] < length) length = commandDataBlock.data[4];
-
-		// Set up the control signals ready for the data in phase
-		scsiInformationTransferPhase(ITPHASE_DATAIN);
-
-		// Transfer page contents
-		if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Sending Descriptor Parameters Page to Host\r\n"));
-
-		for (byteCounter = 0; byteCounter < 14; byteCounter++)
-			hostadapterWriteByte(Descriptor[byteCounter]);
-		
-      hostadapterWriteByte(Descriptor[14]);							// insert Cylinders from .dsc
-      hostadapterWriteByte(Descriptor[15]);								
-
-      hostadapterWriteByte(Descriptor[16]);							//	insert Heads from .dsc
-
-		for (byteCounter = 17; byteCounter < length+1; byteCounter++)
-			hostadapterWriteByte(Descriptor[byteCounter]);		
 
 		// Indicate successful command in status and message
 		commandDataBlock.status = 0x00; // 0x00 = Good
