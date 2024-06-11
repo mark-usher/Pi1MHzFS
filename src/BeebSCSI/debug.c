@@ -70,11 +70,41 @@ void debugString_P(const char *addr)
    while ((c = pgm_read_byte(addr++))) uartWrite(c);
 }
 
+void debugString_C(const char *addr, uint8_t style)
+{
+   char c;
+
+   switch(style)
+   {
+      case DEBUG_SUCCESS:
+         printf("%s", BGRN);
+         break;
+      case DEBUG_INFO:
+         printf("%s", BCYN);
+         break;
+      case DEBUG_WARNING:
+         printf("%s", BYEL);
+         break;
+      case DEBUG_ERROR:
+         printf("%s", BRED);
+         break;
+      case DEBUG_SCSI_COMMAND:
+         printf("%s", BMAG);
+         break;
+      default:
+         printf("%s", WHT);  
+      }
+
+   while ((c = pgm_read_byte(addr++))) uartWrite(c);
+
+   printf("%s", COLOUR_RESET);
+}
 // This function outputs a string stored in RAM space to the UART
 void debugString(const char *string)
 {
    printf("%s", string);
 }
+
 
 // This function outputs a string stored in program space to the UART
 // It should be called with a statement such as:
