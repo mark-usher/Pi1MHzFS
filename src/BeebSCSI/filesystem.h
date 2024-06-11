@@ -35,6 +35,11 @@
 // Calculate the length of the sector buffer in 256 byte sectors
 #define SECTOR_BUFFER_LENGTH	(SECTOR_BUFFER_SIZE / 256)
 
+// (the default '33' is because SuperForm uses a 2:1 interleave format with 33 sectors per
+// track (F-2 in the ACB-4000 manual)). However, not all drives use this figure.
+#define DEFAULT_SECTORS_PER_TRACK 33
+extern uint8_t sectorsperTrack;
+
 // External prototypes
 void filesystemInitialise(uint8_t scsijuke);
 void filesystemReset(void);

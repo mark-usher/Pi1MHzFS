@@ -47,6 +47,7 @@
 
  Fall back to slow seeking if the LUN is too fragmented instead of just failing over.
 
+ altered to allow variable sizes of Sectors per Track. The default is 33
 */
 
 #include <stdbool.h>
@@ -55,6 +56,7 @@
 #include <string.h>
 
 #include "debug.h"
+#include "scsi.h"
 #include "ext_attributes.h"
 #include "fatfs/ff.h"
 #include "filesystem.h"
@@ -63,6 +65,8 @@
 #define SZ_TBL 64
 
 #define MAX_LUNS 8
+
+uint8_t sectorsperTrack = DEFAULT_SECTORS_PER_TRACK;
 
 // File system state structure
 NOINIT_SECTION static struct filesystemStateStruct
@@ -609,11 +613,11 @@ uint32_t filesystemGetLunSizeFromDsc( uint8_t lunNumber)
       // The drive size (actual data storage) is calculated by the following formula:
       //
       // tracks = heads * cylinders
-      // sectors = tracks * 33
-      // (the '33' is because SuperForm uses a 2:1 interleave format with 33 sectors per
+      // sectors = tracks * sectors per track
+      // (the default '33' is because SuperForm uses a 2:1 interleave format with 33 sectors per
       // track (F-2 in the ACB-4000 manual))
       // bytes = sectors * block size (block size is always 256 bytes)
-      lunSize = ((dataHeadCount * cylinderCount) * 33) * blockSize;
+      lunSize = ((dataHeadCount * cylinderCount) * sectorsperTrack) * blockSize;
       f_close(&fileObject);
    }
 
@@ -634,7 +638,7 @@ bool filesystemCreateDscFromLunImage(uint8_t lunDirectory, uint8_t lunNumber, ui
    uint8_t Buffer[22];
    FIL fileObject;
 
-   // Calculate the LUN file size in tracks (33 sectors per track, 256 bytes per sector)
+   // Calculate the LUN file size in tracks (n sectors per track, 256 bytes per sector)
 
    // Check that the LUN file size is actually a size which ADFS can support (the number of sectors is limited to a 21 bit number)
    // i.e. a maximum of 0x1FFFFF or 2,097,151 (* 256 bytes per sector = 512Mb = 536,870,656 bytes)
@@ -643,11 +647,11 @@ bool filesystemCreateDscFromLunImage(uint8_t lunDirectory, uint8_t lunNumber, ui
    }
 
    // Check that the LUN file size is actually a size which the ACB-4000 card could have supported (given that the
-   // block and track sizes were fixed to 256 and 33 respectively)
-   if (lunFileSize % (256 * 33) != 0) {
+   // block and track sizes were fixed to 256 and a default of 33 respectively)
+   if (lunFileSize % (256 * sectorsperTrack) != 0) {
       if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCreateDscFromLunImage(): WARNING: The LUN file size could not be supported by an ACB-4000 card\r\n"));
    }
-   lunFileSize = lunFileSize / (33 * 256);
+   lunFileSize = lunFileSize / (sectorsperTrack * 256);
 
    // The lunFileSize (in tracks) should be evenly divisible by the head count and the head count should be
    // 16 or less.
@@ -656,9 +660,10 @@ bool filesystemCreateDscFromLunImage(uint8_t lunDirectory, uint8_t lunNumber, ui
    cylinders = lunFileSize / heads;
 
    if (debugFlag_filesystem) {
-      debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): LUN size in tracks (33 * 256 bytes) = "), lunFileSize, true);
+      debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): LUN size in tracks (sectorsperTrack * 256 bytes) = "), lunFileSize, true);
       debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): Number of heads = "), heads, true);
       debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): Number of cylinders = "), cylinders, true);
+      debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): Number of sectors per track = "), sectorsperTrack, true);
    }
    // The first 4 bytes are the Mode Select Parameter List (ACB-4000 manual figure 5-18)
    Buffer[ 0] = 0;      // Reserved (0)
@@ -922,8 +927,8 @@ bool filesystemFormatLun(uint8_t lunNumber, uint8_t dataPattern)
 
    // Calculate the number of 256 byte sectors required to fulfill the drive geometry
    // tracks = heads * cylinders
-   // sectors = tracks * 33
-   requiredNumberOfSectors = ((uint32_t)Buffer[15] * (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14])) * 33;
+   // sectors = tracks * sectorsperTrack
+   requiredNumberOfSectors = ((uint32_t)Buffer[15] * (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14])) * sectorsperTrack;
    if (debugFlag_filesystem) debugStringInt32_P(PSTR("File system: filesystemFormatLun(): Sectors required = "), requiredNumberOfSectors, true);
 
    // Assemble the .dat file name
