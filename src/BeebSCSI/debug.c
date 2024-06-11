@@ -193,8 +193,8 @@ void debugLunDescriptor(const uint8_t *buffer)
    // The drive size (actual data storage) is calculated by the following formula:
    //
    // tracks = heads * cylinders
-   // sectors = tracks * 33
-   // (the '33' is because SuperForm uses a 2:1 interleave format with 33 sectors per
+   // sectors = tracks * sectors per track
+   // (the default '33' is because SuperForm uses a 2:1 interleave format with 33 sectors per
    // track (F-2 in the ACB-4000 manual))
    // bytes = sectors * block size (block size is always 256 bytes)
 }
