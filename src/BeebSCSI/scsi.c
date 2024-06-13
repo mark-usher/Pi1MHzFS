@@ -40,207 +40,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 // Local includes
 
 #include "debug.h"
+#include "scsi.h"
 #include "ext_attributes.h"
 #include "hostadapter.h"
 #include "filesystem.h"
 #include "statusled.h"
-#include "scsi.h"
-
-typedef struct {
-	uint8_t  ModeDataLength;
-	uint8_t  MediumType;		
-	uint8_t  WriteProtect;
-   uint8_t  BlockDescriptorLength;
-} mode_parameter_header;
-
-typedef struct {
-   uint8_t  MSB;
-   uint8_t  CSB;
-   uint8_t  LSB;
-} uint3byte;
-
-typedef struct {
-   uint32_t  NumberOfBlocks;
-   uint8_t   Reserved;
-   uint3byte LogicalBlockLength;
-} LBA_short_block_descriptor;
-
-typedef struct {
-   uint8_t  PageCode;
-   uint8_t  PageLength;
-   uint8_t  PageData[];
-} modepage;
-
-// Mode Parameter Pages
-static const uint8_t ErrorCorrectionStatus[] =	// Page 1
-{
-// Mode Parameter Header
-0x10,             // Mode Data Length (16)                       ?buffer% = 8 bytes returned
-0x00,             // Medium Type                              
-0x00,             // Write Protect bit/Rsvd/DPOFUA/Resvd
-0x08,             // Block Descriptor Length (8)                  blength = buffer%?3 = 0   
-// (Short LBA) Block Descriptor                                            
-0x00, 0x00, 0x00,	// Number of Blocks
-0x00,
-0x00,			      // Reserved
-0x00, 0x01, 0x00,	// Logical Block Length (256)
-// Mode Page - Error Correction Status Parameters                                   
-0x01,             // Page Code                                       1     buffer%?4+blength
-0x03,             // Page Length                                     3
-0x20,             // | 7 | 6 | TB | 4 | 3 | PER | DTE | DCR |        20
-0x04,             // Error recovery Retries (4)                      4
-0x05,             // Error Correction Bit Span (5)                   5    to + ?buffer% = pagelen
-};
-static const uint8_t FormatDevice[] =	         // Page 3
-{
-	// Mode Parameter Header
-0x23,				   // Mode Data Length (35)
-0x00,				   // Medium Type
-0x00,			   	// Write Protect bit/Rsvd/DPOFUA/Resvd
-0x08,			  	   // Block Descriptor Length (8)
-// (Short LBA) Block Descriptor
-0x00, 0x00, 0x00,	// Number of Blocks
-0x00,
-0x00,				   // Reserved                                        0x18 (24)?buffer% = number of bytes = pagelen
-0x00, 0x01, 0x00,	// Logical Block Length (256)
-// Mode Page - Format Device Parameters
-0x03,				   // Page Code                                       3        buffer%?4+blength     
-0x16,				   // Page Length (22)                                13       buffer%?5  (19)
-0x00, 0x00,			// Tracks per Zone (MSB, LSB)                      1   32
-0x00, 0x00,			// Alternate Sectors per Zone (MSB, LSB)           1   32
-0x00, 0x00,			// Alternate Tracks per Zone (MSB, LSB)            0    6
-0x00, 0x00,			// Alternate Tracks per Volume (MSB, LSB)          0    6
-0x00, 0x21,			// Sectors per Track (MSB, LSB)                    0   3D
-0x01, 0x00,			// Data Bytes per Physical Sector (MSB, LSB)       1    0
-0x00, 0x00,			// Interleave (MSB, LSB)                           0    8
-0x00, 0x00,			// Track Skew Factor (MSB, LSB)                    0    0
-0x00, 0x00,			// Cylinder Skew Factor (MSB, LSB)                 0    0 
-0x00,				   // SSEC/HSEC/RMB/SURF/Drive Type                   8    0   to pagelen
-0x00, 0x00, 0x00,	// Reserved
-};
-static const uint8_t RigidDiskDriveGeometry[] =	// Page 4
-{
-// Mode Parameter Header
-0x24,				   // Mode Data Length (36)
-0x00,				   // Medium Type
-0x00,				   // Write Protect bit/Rsvd/DPOFUA/Rsvd
-0x08,				   // Block Descriptor Length (8)
-// (Short LBA) Block Descriptor
-0x00, 0x00, 0x00,	// Number of Blocks
-0x00,
-0x00,				   // Reserved
-0x00, 0x01, 0x00,	// Logical Block Length (256)
-// Mode Page - Rigid Disk Drive Geometry Parameters
-0x04,				   // Page Code                                     4
-0x17,				   // Page Length (23)                              4
-0x00, 0x01, 0x32,	// Number of Cylinders (MSB-LSB)                 0  1  32
-0x04,				   // Number of Heads                               4
-0x00, 0x00,	0x00,	// Starting Cylinder - Write Pre-compensation (MSB-LSB)
-0x00, 0x00,	0x00,	// Starting Cylinder - Reduced Write Current (MSB-LSB)
-0x00, 0x00,			// Drive Step Rate (MSB, LSB)
-0x00, 0x00,	0x00,	// Landing Zone Cylinder (MSB-LSB)
-0x00,				   // RPL
-0x00, 0x00,			// Rotational Offset
-0x00,				   // Reserved
-0x00,				   // Medium Rotation Rate
-0x00, 0x00, 0x00,	// Reserved
-};
-static const uint8_t SerialNumber[] =	         // Page 32
-{
-	// Mode Parameter Header
-0x15,				// Mode Data Length (21)
-0x00,				// Medium Type
-0x00,				// Write Protect bit/Resvd/DPOFUA/Resvd
-0x08,				// Block Descriptor Length (8)
-	// (Short LBA) Block Descriptor
-0x00, 0x00, 0x00,	// Number of Blocks
-0x00,
-0x00,				// Reserved
-0x00, 0x01, 0x00,	// Logical Block Length (256)
-	//Mode Page - Serial Number Parameters 
-0x20,				// Page Code
-0x07,				// Page Length (8)
-0x30, 0x30, 0x30,	// Serial Number (8 bytes)
-0x30, 0x30, 0x30,
-0x30, 0x30
-};
-static const uint8_t Manufacturer[] =	         // Page 33
-{
-	// Mode Parameter Header
-0x13,				// Mode Data Length (19)
-0x00,				// Medium Type
-0x00,				// Write Protect bit/Rsvd/DPOFUA/Resvd
-0x08,				// Block Descriptor Length (8)
-	// (Short LBA) Block Descriptor
-0x00, 0x00, 0x00,	// Number of Blocks
-0x00,
-0x00,				// Reserved
-0x00, 0x01, 0x00,	// Logical Block Length (256)
-	// Mode Page - Manufacture Parameters
-0x21,				// Page Code	
-0x06,				// Page Length (6)
-0x59, 0x0B, 0x1B,	// Manufacture Date and Build Level (6 bytes)
-0x00, 0x00, 0x00
-};
-static const uint8_t SystemFlags[] =            // Page 35
-{
-	// Mode Parameter Header
-0x13,				// Mode Data Length (19)
-0x00,				// Medium Type
-0x00,				// Write Protect bit/Rsvd/DPOFUA/Rsvd
-0x08,				// Block Descriptor Length (8)
-	// (Short LBA) Block Descriptor
-0x00, 0x00, 0x00,	// Number of Blocks
-0x00,
-0x00,				// Reserved
-0x00, 0x01, 0x00,	// Logical Block Length (256)
-	// Mode Page - System Flags Parameters
-0x23,				// Page Code
-0x06,				// Page Length (6)
-0x00, 0x00, 0x00,	// System Flags (6)
-0x00, 0x00, 0x00
-};
-static const uint8_t Copyright1[] =	            // Page 37
-{
-	// Mode Parameter Header
-0x13,				// Mode Data Length (19)
-0x00,				// Medium Type
-0x00,				// Write Protect bit/Rsvd/DPOFUA/Rsvd
-0x08,				// Block Descriptor Length (8)
-	// (Short LBA) Block Descriptor
-0x00, 0x00, 0x00,	// Number of Blocks
-0x00,
-0x00,				// Reserved
-0x00, 0x01, 0x00,	// Logical Block Length (256)
-	// Mode Page - Copyright#1 Parameters
-0x25,				// Page Code
-0x06,				// Page Length (6)
-0x28, 0x43, 0x29,	// "(C)A",<cr>,0 (6-bytes)
-0x41, 0x0D, 0x00
-};
-static const uint8_t Copyright2[] =	            // Page 38
-{
-	// Mode Parameter Header
-0x13,				// Mode Data Length (19)
-0x00,				// Medium Type
-0x00,				// Write Protect bit/Rsvd/DPOFUA/Rsvd
-0x08,				// Block Descriptor Length (8)
-	// (Short LBA) Block Descriptor
-0x00, 0x00, 0x00,	// Number of Blocks
-0x00,
-0x00,				// Reserved
-0x00, 0x01, 0x00,	// Logical Block Length (256)
-	// Mode Page - System Flags Parameters
-0x26,				// Page Code
-0x06,				// Page Length (6)
-0x63, 0x6F, 0x72,	// "corn", <cr>, 0 (6-bytes)
-0x6E, 0x0D, 0x00
-};
-
 
 // Uncomment next line to enable Fcode support
 //#define FCODE
@@ -475,13 +284,13 @@ void scsiProcessEmulation(void)
       scsiState = scsiCommandReadCapacity();
       break;
 
-   	case SCSI_INQUIRY:
-		scsiState = scsiCommandInquiry();
-		break;
+      case SCSI_INQUIRY:
+      scsiState = scsiCommandInquiry();
+      break;
 
-		case SCSI_SENDDIAGNOSTIC:
-		scsiState = scsiCommandSendDiagnostic();
-		break;
+      case SCSI_SENDDIAGNOSTIC:
+      scsiState = scsiCommandSendDiagnostic();
+      break;
 
 #ifdef FCODE
       // Handle LV-DOS specific group 6 commands
@@ -719,9 +528,9 @@ uint8_t scsiEmulationCommand(void)
          return SCSI_TRANSLATE;
          break;
 
-			case 0x12:
-			return SCSI_INQUIRY;
-			break;
+         case 0x12:
+         return SCSI_INQUIRY;
+         break;
 
          case 0x15:
          return SCSI_MODESELECT;
@@ -735,8 +544,8 @@ uint8_t scsiEmulationCommand(void)
          return SCSI_STARTSTOP;
          break;
 
-  			case 0x1D:
-			return SCSI_SENDDIAGNOSTIC;
+         case 0x1D:
+         return SCSI_SENDDIAGNOSTIC;
          break;
       }
    }
@@ -1525,15 +1334,16 @@ static uint8_t scsiCommandTranslate(void)
    // Get the number of heads per cylinder (HPC)
    headsPerCylinder = (uint32_t)Buffer[15]; // Data head count
 
-   // Convert LBA to CHS (sectors per track is always 33)
-   cylinderNumber = logicalBlockAddress / (headsPerCylinder * 33);
-   headNumber = (logicalBlockAddress / 33) % headsPerCylinder;
-   bytesFromIndex = ((logicalBlockAddress % 33) + 1) * 256; // Sector number * block size (256)
+   // Convert LBA to CHS
+   cylinderNumber = logicalBlockAddress / (headsPerCylinder * sectorsperTrack);
+   headNumber = (logicalBlockAddress / sectorsperTrack) % headsPerCylinder;
+   bytesFromIndex = ((logicalBlockAddress % sectorsperTrack) + 1) * 256; // Sector number * block size (256)
 
    if (debugFlag_scsiCommands) {
       debugStringInt32_P(PSTR("SCSI Commands:   LBA = "), logicalBlockAddress, true);
       debugStringInt32_P(PSTR("SCSI Commands:   Heads/Cyl = "), headsPerCylinder, true);
       debugStringInt32_P(PSTR("SCSI Commands:   Cylinder = "), cylinderNumber, true);
+      debugStringInt32_P(PSTR("SCSI Commands:   Sectors per Track = "), sectorsperTrack, true);
       debugStringInt32_P(PSTR("SCSI Commands:   Head = "), headNumber, true);
       debugStringInt32_P(PSTR("SCSI Commands:   Bytes = "), bytesFromIndex, true);
    }
@@ -1608,7 +1418,7 @@ static uint8_t scsiCommandModeSelect(void)
 
    if (length != 22) {
       if (debugFlag_scsiCommands)debugStringInt16_P(PSTR("Invalid Parameter Length : \r\n"), length, true);
-      if (debugFlag_scsiCommands)debugString_P(PSTR("MODE SELECT Parameters :")); 
+      if (debugFlag_scsiCommands)debugString_P(PSTR("MODE SELECT Parameters :"));
       if (debugFlag_scsiCommands)debugStringInt16_P(PSTR(" "), commandDataBlock.data[commandDataBlockPointer], false);
 
       // Next byte...
@@ -1622,10 +1432,10 @@ static uint8_t scsiCommandModeSelect(void)
          if (debugFlag_scsiCommands)debugStringInt16_P(PSTR(" "), commandDataBlock.data[commandDataBlockPointer], false);
          commandDataBlockPointer++;
       }
-      
+
       if (debugFlag_scsiCommands)debugString_P(PSTR("\r\n"));
       if (debugFlag_scsiCommands)debugString_P(PSTR("SCSI Commands: Bad Argument error\r\n"));
-      
+
       // Indicate unsuccessful command in status and message
       commandDataBlock.status = (uint8_t)(commandDataBlock.targetLUN << 5) | 0x02; // 0x02 = Bad
 
@@ -1668,302 +1478,93 @@ static uint8_t scsiCommandModeSelect(void)
 //
 static uint8_t scsiCommandModeSense(void)
 {
-   uint8_t Buffer[22];
-  	uint8_t byteCounter;
-	uint8_t length;
+
+   uint8_t sizerequested = commandDataBlock.data[4];
+   uint8_t buf[sizerequested];
+   memset(buf, 0x00 , sizerequested);
 
    if (debugFlag_scsiCommands) {
-      debugString_P(PSTR("SCSI Commands: MODESENSE command (0x1A) received\r\n"));
+      debugString_C(PSTR("SCSI Commands: MODESENSE command (0x1A) received\r\n"),DEBUG_SCSI_COMMAND);
       debugStringInt16_P(PSTR("SCSI Commands: Target LUN = "), commandDataBlock.targetLUN, true);
 
+      debugStringInt16_P(PSTR("SCSI Commands: Mode Page requested = "), commandDataBlock.data[2], true);
 
       // We do not check if the LUN is available since there (at this point) may only be a descriptor
       // file for the LUN.  If the descriptor cannot be read we assume that the LUN is completely unavailable
 
       // We emulate soft-sectored hard drives only, so the drive parameter list must be 22 bytes
       debugStringInt16_P(PSTR("SCSI Commands: List length = "), commandDataBlock.data[4], true);
-      debugStringInt16_P(PSTR("SCSI Commands: Mode Sense Page = "), commandDataBlock.data[2], true);
    }
-  
- 	// Transition to command based on page
-	switch (commandDataBlock.data[2]) {
 
- //==============================================================================
+   if (extAttributes) {
+      // read mode page data
+      if (readModePage(commandDataBlock.targetLUN, commandDataBlock.data[2], sizerequested, buf) == 0) {
+         // transfer the data found
 
-		case 0:	// Descriptor File
-		//
-		// Adaptec ACB-4000 Manual notes:
-		// This command is used to interrogate the ACB-4000A and ACB-4070
-		// device parameter table to determine the specific characteristics
-		// of any disk drive currently attached. The attached drive must
-		// have been formatted by an ACB-4000A or ACB-4070 for this to be a
-		// legal command.
-		//	
- 
-      if (commandDataBlock.data[4] != 22) {
-         if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Bad Argument error\r\n"));
+         // Set up the control signals ready for the data in phase
+         scsiInformationTransferPhase(ITPHASE_DATAIN);
+
+         // Transfer the buffer contents
+         if (debugFlag_scsiCommands) debugString_C(PSTR("SCSI Commands: Sending Page Mode data to host\r\n"), DEBUG_SUCCESS);
+
+         for (uint8_t i = 0; i < sizerequested; i++)
+               hostadapterWriteByte(buf[i]);
+
+         // Indicate successful command in status and message
+         commandDataBlock.status = 0x00; // 0x00 = Good
+      }
+      else
+      {
+         // no data found either default or in the extended file
+
+         if (debugFlag_scsiCommands) debugString_C(PSTR("SCSI Commands: Bad Page Argument\r\n"), DEBUG_ERROR);
          // Indicate unsuccessful command in status and message
          commandDataBlock.status = (uint8_t)(commandDataBlock.targetLUN << 5) | 0x02; // 0x02 = Bad
 
          // Set request sense error globals
          requestSenseData[commandDataBlock.targetLUN] = BAD_ARG; // Bad argument
       }
+   }
+   else {
+
+      // extended attributes are not available
+      if (debugFlag_scsiCommands) debugString_C(PSTR("SCSI Commands: extended attributes not available.\r\n"), DEBUG_WARNING);
+
+      if (commandDataBlock.data[4] != 22) {
+         if (debugFlag_scsiCommands) debugString_C(PSTR("SCSI Commands: Bad Argument != 22 in length error\r\n."), DEBUG_ERROR);
+         // Indicate unsuccessful command in status and message
+         commandDataBlock.status = (uint8_t)(commandDataBlock.targetLUN << 5) | 0x02; // 0x02 = Bad
+
+         // Set request sense error globals
+         requestSenseData[commandDataBlock.targetLUN] = BAD_ARG; // Bad argument
+
+         return SCSI_STATUS;
+      }
 
       // Read the drive descriptor
-      if (filesystemReadLunDescriptor(commandDataBlock.targetLUN, Buffer)) {
+      if (filesystemReadLunDescriptor(commandDataBlock.targetLUN, buf)) {
          // DSC read OK - Transfer the DSC contents to the host
+
+         if (debugFlag_scsiCommands) debugLunDescriptor(buf);
 
          // Set up the control signals ready for the data in phase
          scsiInformationTransferPhase(ITPHASE_DATAIN);
 
          // Transfer the DSC contents
          if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Sending LUN descriptor to host\r\n"));
-         for (byteCounter = 0; byteCounter < 22; byteCounter++)
-            hostadapterWriteByte(Buffer[byteCounter]);
-
-         // Indicate successful command in status and message
-         commandDataBlock.status = 0x00; // 0x00 = Good
-      
+         for (uint8_t byteCounter = 0; byteCounter < 22; byteCounter++)
+            hostadapterWriteByte(buf[byteCounter]);
       } else {
          // DSC not OK
-         if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Descriptor read error\r\n"));
+         if (debugFlag_scsiCommands) debugString_C(PSTR("SCSI Commands: Descriptor read error\r\n"), DEBUG_ERROR);
 
          // Indicate unsuccessful command in status and message
          commandDataBlock.status = (uint8_t)(commandDataBlock.targetLUN << 5) | 0x02; // 0x02 = Bad
 
          // Set request sense error globals
          requestSenseData[commandDataBlock.targetLUN] = BAD_ARG; // Bad argument
+
       }
-      break;
-
-//==============================================================================
-
-		case 1: // Error Correction Status Parameters Page
-		
-		// Used by FileStore Dealer Disk FServFMT
-
-		length = ErrorCorrectionStatus[0] + 1;									// send whole page unless Allocation Length is smaller
-		if (commandDataBlock.data[4] < length) length = commandDataBlock.data[4];
-
-		// Set up the control signals ready for the data in phase
-		scsiInformationTransferPhase(ITPHASE_DATAIN);
-
-		// Transfer page contents
-      if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Sending Error Correction Status Parameters Page to Host\r\n"));
-
-		for (byteCounter = 0; byteCounter < length; byteCounter++)
-			hostadapterWriteByte(ErrorCorrectionStatus[byteCounter]);
-
-		// Indicate successful command in status and message
-		commandDataBlock.status = 0x00;											// 0x00 = Good
-
-		break;
-
-//==============================================================================
-
-		case 3: // Format Device Parameters Page
-				// Used by FileStore Dealer Disk FServFMT and FServINIT
-
-		// Read the drive descriptor
-		if (filesystemReadLunDescriptor(commandDataBlock.targetLUN, Buffer)) {
-			// DSC read OK
-
-			length = FormatDevice[0] + 1;											// send whole page unless Allocation Length is smaller
-			if (commandDataBlock.data[4] < length) length = commandDataBlock.data[4];
-
-			// Set up the control signals ready for the data in phase
-			scsiInformationTransferPhase(ITPHASE_DATAIN);
-
-			// Transfer page contents
-      if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Sending Format Device Parameters Page to Host\r\n"));
-
-			for (byteCounter = 0; byteCounter < 22; byteCounter++)		// first 22 bytes from parameters page
-				hostadapterWriteByte(FormatDevice[byteCounter]);
-
-			hostadapterWriteByte(0);												// Insert Sectors per Track from ??
-			hostadapterWriteByte(33);
-
-			hostadapterWriteByte(FormatDevice[24]);							// Insert Data Bytes per Physical Sector from parameters page
-			hostadapterWriteByte(FormatDevice[25]);
-
-			hostadapterWriteByte(0);												// Insert Interleave (not used)
-			hostadapterWriteByte(0);
-
-			for (byteCounter = 28; byteCounter < length; byteCounter++)	// final 8 bytes from parameters page
-				hostadapterWriteByte(FormatDevice[byteCounter]);
-
-			// Indicate successful command in status and message
-			commandDataBlock.status = 0x00; // 0x00 = Good
-		}
-		else {
-          // DSC not OK
-         if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Descriptor read error\r\n"));
-
-         // Indicate unsuccessful command in status and message
-         commandDataBlock.status = (uint8_t)(commandDataBlock.targetLUN << 5) | 0x02; // 0x02 = Bad
-
-         // Set request sense error globals
-         requestSenseData[commandDataBlock.targetLUN] = BAD_ARG; // Bad argument
-		}
-		break;
-
-    // =============================================================================
-
-		case 4:		// Rigid Disk Drive Geometry Parameters Page
-					   // Used by FileStore Dealer Disk FServFMT and FServINIT
-
-		// Read the drive descriptor
-		if (filesystemReadLunDescriptor(commandDataBlock.targetLUN, Buffer)) {
-			// DSC read OK
-
-			length = RigidDiskDriveGeometry[0] + 1;									// send whole page unless Allocation Length is smaller
-			if (commandDataBlock.data[4] < length + 1) length = commandDataBlock.data[4];
-
-			// Set up the control signals ready for the data in phase
-			scsiInformationTransferPhase(ITPHASE_DATAIN);
-
-			// Transfer page contents
-			if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Sending Rigid Disk Drive Geometry Parameters Page to Host\r\n"));
-
-			for (byteCounter = 0; byteCounter < 14; byteCounter++)				// first 13 bytes from parameters page
-				hostadapterWriteByte(RigidDiskDriveGeometry[byteCounter]);
-
-         hostadapterWriteByte(0);											         // Insert Cylinder Count from .dsc
-         hostadapterWriteByte(Buffer[13]);
-         hostadapterWriteByte(Buffer[14]);				
-         hostadapterWriteByte(Buffer[15]);							            // Insert Data Head Count from .dsc
-
-			for (byteCounter = 18; byteCounter < length; byteCounter++)			// final 19 bytes from parameters page
-				hostadapterWriteByte(RigidDiskDriveGeometry[byteCounter]);
-
-			// Indicate successful command in status and message
-			commandDataBlock.status = 0x00; // 0x00 = Good
-		}
-		else {
-         // DSC not OK
-         if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Descriptor read error\r\n"));
-
-         // Indicate unsuccessful command in status and message
-         commandDataBlock.status = (uint8_t)(commandDataBlock.targetLUN << 5) | 0x02; // 0x02 = Bad
-
-         // Set request sense error globals
-         requestSenseData[commandDataBlock.targetLUN] = BAD_ARG; // Bad argument
-		}
-		break;
-
-//=============================================================================
-
-		case 32:	// Serial Number Parameters Page
-		
-		// Used by FileStore Dealer Disk FServFMT and FServINIT
-
-		length = SerialNumber[0] + 1;											// send whole page unless Allocation Length is smaller
-		if (commandDataBlock.data[4] < length) length = commandDataBlock.data[4];
-
-		// Set up the control signals ready for the data in phase
-		scsiInformationTransferPhase(ITPHASE_DATAIN);
-
-		// Transfer page contents
-		if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Sending Serial Number Parameters Page to Host\r\n"));
-
-		for (byteCounter = 0; byteCounter < length; byteCounter++)
-			hostadapterWriteByte(SerialNumber[byteCounter]);
-
-		// Indicate successful command in status and message
-		commandDataBlock.status = 0x00; // 0x00 = Good
-		break;
-
-//==============================================================================
-
-		case 33:	// Manufacturer Parameters Page
-
-		length = Manufacturer[0] + 1;											// send whole page unless Allocation Length is smaller
-		if (commandDataBlock.data[4] < length) length = commandDataBlock.data[4];
-
-		// Set up the control signals ready for the data in phase
-		scsiInformationTransferPhase(ITPHASE_DATAIN);
-
-		// Transfer page contents
-		if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Sending Manufacturer Parameters Page to Host\r\n"));
-
-		for (byteCounter = 0; byteCounter < length; byteCounter++)
-			hostadapterWriteByte(Manufacturer[byteCounter]);
-
-		// Indicate successful command in status and message
-		commandDataBlock.status = 0x00; // 0x00 = Good
-		break;
-
-//==============================================================================
-
-		case 35:	// System Flags Parameters Page
-
-		length = SystemFlags[0] + 1;											// send whole page unless Allocation Length is smaller
-		if (commandDataBlock.data[4] < length) length = commandDataBlock.data[4];
-
-		// Set up the control signals ready for the data in phase
-		scsiInformationTransferPhase(ITPHASE_DATAIN);
-
-		// Transfer page contents
-		if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Sending System Flags Paramater Page to Host\r\n"));
-
-		for (byteCounter = 0; byteCounter < length; byteCounter++)
-			hostadapterWriteByte(SystemFlags[byteCounter]);	
-
-		// Indicate successful command in status and message
-		commandDataBlock.status = 0x00; // 0x00 = Good
-		break;
-
-//==============================================================================
-
-		case 37:	// Copyright#1 Page
-
-		length = Copyright1[0] + 1;											// send whole page unless Allocation Length is smaller
-		if (commandDataBlock.data[4] < length) length = commandDataBlock.data[4];
-
-		// Set up the control signals ready for the data in phase
-		scsiInformationTransferPhase(ITPHASE_DATAIN);
-
-		// Transfer page contents
-		if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Sending Copyright#1 Parameters Page to Host\r\n"));
-
-		for (byteCounter = 0; byteCounter < length; byteCounter++)
-			hostadapterWriteByte(Copyright1[byteCounter]);
-
-		// Indicate successful command in status and message
-		commandDataBlock.status = 0x00; // 0x00 = Good
-		break;
-
-//==============================================================================
-
-		case 38:	// Copyright#2 page
-
-		length = Copyright2[0] + 1;											// send whole page unless Allocation Length is smaller
-		if (commandDataBlock.data[4] < length) length = commandDataBlock.data[4];
-
-		// Set up the control signals ready for the data in phase
-		scsiInformationTransferPhase(ITPHASE_DATAIN);
-
-		// Transfer page contents
-		if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Sending Copyright#2 Parameters Page to Host\r\n"));
-
-		for (byteCounter = 0; byteCounter < length; byteCounter++)
-			hostadapterWriteByte(Copyright2[byteCounter]);
-
-		// Indicate successful command in status and message
-		commandDataBlock.status = 0x00; // 0x00 = Good
-		break;
-
-//==============================================================================
-
-      default:
-      if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: Unrecognised Page Error\r\n"));
-
-		// Indicate unsuccessful command in status and message
-		commandDataBlock.status = (commandDataBlock.targetLUN << 5) | 0x02;	// 0x02 = Bad
-
-      // Set request sense error globals
-      requestSenseData[commandDataBlock.targetLUN] = BAD_ARG; // Bad argument
-      break;
    }
 
    return SCSI_STATUS;
@@ -2078,8 +1679,8 @@ static uint8_t scsiCommandVerify(void)
       // The drive size (actual data storage) is calculated by the following formula:
       //
       // tracks = heads * cylinders
-      // sectors = tracks * 33 (33 tracks per sector)
-      lunSizeInSectors = ((uint32_t)Buffer[15] * (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14])) * 33;
+      // sectors = tracks * sectors per track
+      lunSizeInSectors = ((uint32_t)Buffer[15] * (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14])) * sectorsperTrack;
    } else {
       // DSC not OK
       if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: DSC read error\r\n"));
@@ -2159,20 +1760,20 @@ static uint8_t scsiCommandReadCapacity(void)
 static uint8_t scsiCommandInquiry(void)
 {
 
-	if (debugFlag_scsiCommands) {
-		debugString_P(PSTR("SCSI Commands: CommandInquiry (0x12) received\r\n"));
+   if (debugFlag_scsiCommands) {
+      debugString_C(PSTR("SCSI Commands: CommandInquiry (0x12) received\r\n"), DEBUG_SCSI_COMMAND);
       debugStringInt16_P(PSTR("SCSI Commands: Target LUN = "), commandDataBlock.targetLUN, true);
       debugStringInt16_P(PSTR("SCSI Commands: Length = "),commandDataBlock.data[4], true);
    }
 
-	if (commandDataBlock.data[4] < 36) {
-		if (debugFlag_scsiCommands) 
+   if (commandDataBlock.data[4] < 36) {
+      if (debugFlag_scsiCommands)
          debugString_P(PSTR("SCSI Commands: scsiCommandInquiry: Allocation length too short. Min. 36 bytes\r\n"));
 
-		// Indicate unsuccessful command in status and message
-		commandDataBlock.status = (commandDataBlock.targetLUN << 5) | 0x02;		// 0x02 = Bad
-	}
-	else {
+      // Indicate unsuccessful command in status and message
+      commandDataBlock.status = (commandDataBlock.targetLUN << 5) | 0x02;      // 0x02 = Bad
+      }
+      else {
       // create a temporary buffer the size of the data to be returned
       uint8_t buf[commandDataBlock.data[4]];
 
@@ -2182,7 +1783,7 @@ static uint8_t scsiCommandInquiry(void)
          scsiInformationTransferPhase(ITPHASE_DATAIN);
 
          char msg[256];
-         sprintf(msg, "SCSI Command Inquiry: buffer returned and contains:'%s'\r\n", buf);
+         sprintf(msg, "SCSI Command Inquiry: buffer returned and contains:%s\r\n", buf);
          debugString_P(PSTR(msg));
 
          // send back the inquiry data
@@ -2193,15 +1794,15 @@ static uint8_t scsiCommandInquiry(void)
          commandDataBlock.status = 0x00; // 0x00 = Good
       }
       else {
-     		if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: scsiCommandInquiry: Error reading Inquiry data\r\n"));
+           if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: scsiCommandInquiry: Error reading Inquiry data\r\n"));
 
-   		// Indicate unsuccessful command in status and message
-	   	commandDataBlock.status = (commandDataBlock.targetLUN << 5) | 0x02;		// 0x02 = Bad
+         // Indicate unsuccessful command in status and message
+         commandDataBlock.status = (commandDataBlock.targetLUN << 5) | 0x02;      // 0x02 = Bad
       }
 
-	}
+   }
 
-	return SCSI_STATUS;
+   return SCSI_STATUS;
 }
 
 // SCSI Command (0x1D) Send Diagnostic
@@ -2209,15 +1810,15 @@ static uint8_t scsiCommandInquiry(void)
 // No need to implement hard drive diagnostics. Just return command completed successfully
 static uint8_t scsiCommandSendDiagnostic(void)
 {
-	if (debugFlag_scsiCommands) {
-		debugString_P(PSTR("SCSI Commands: SEND DIAGNOSTIC command (0x1D) received\r\n"));
-		debugStringInt16_P(PSTR("SCSI Commands: Allocation Length = "), commandDataBlock.data[4], true);
-	}
+   if (debugFlag_scsiCommands) {
+      debugString_P(PSTR("SCSI Commands: SEND DIAGNOSTIC command (0x1D) received\r\n"));
+      debugStringInt16_P(PSTR("SCSI Commands: Allocation Length = "), commandDataBlock.data[4], true);
+   }
 
-	// Indicate successful command in status and message
-	commandDataBlock.status = 0x00; // 0x00 = Good
+   // Indicate successful command in status and message
+   commandDataBlock.status = 0x00; // 0x00 = Good
 
-	return SCSI_STATUS;	
+   return SCSI_STATUS;
 }
 #ifdef FCODE
 // LV-DOS specific group 6 commands -----------------------------------------------------------------------------------
