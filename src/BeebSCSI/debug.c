@@ -228,4 +228,25 @@ void debugLunDescriptor(const uint8_t *buffer)
    // track (F-2 in the ACB-4000 manual))
    // bytes = sectors * block size (block size is always 256 bytes)
 }
+
+// This function decodes the contents of the LUN descriptor and outputs it to debug
+void debugBuffer(const uint8_t *buffer, size_t length)
+{
+   debugString_P(PSTR("Debug: Buffer contents:\r\n"));
+
+   for (size_t i = 0; i <= length; i++ ) {
+      debugStringInt16_P(PSTR("Debug:   Buffer["), i, false);
+      debugStringInt16_P(PSTR("] = "), buffer[i], true);
+   }
+
+   // Note:
+   //
+   // The drive size (actual data storage) is calculated by the following formula:
+   //
+   // tracks = heads * cylinders
+   // sectors = tracks * sectors per track
+   // (the default '33' is because SuperForm uses a 2:1 interleave format with 33 sectors per
+   // track (F-2 in the ACB-4000 manual))
+   // bytes = sectors * block size (block size is always 256 bytes)
+}
 #endif

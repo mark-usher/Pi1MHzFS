@@ -49,6 +49,7 @@ void debugStringInt32_P(const char *addr, uint32_t integerValue, bool newLine);
 
 void debugSectorBufferHex(const uint8_t *buffer, uint16_t numberOfBytes);
 void debugLunDescriptor(const uint8_t *buffer);
+void debugBuffer(const uint8_t *buffer, size_t length);
 #else
 #define debugString_P(...) {}
 #define debugString(...) {}
@@ -58,6 +59,7 @@ void debugLunDescriptor(const uint8_t *buffer);
 #define debugStringInt32_P(...) {}
 #define debugSectorBufferHex(...) {}
 #define debugLunDescriptor(...) {}
+#define debugBuffer(...) {}
 
 #endif
 
