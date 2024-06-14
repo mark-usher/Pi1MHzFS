@@ -1498,7 +1498,7 @@ static uint8_t scsiCommandModeSense(void)
 
    if (extAttributes) {
       // read mode page data
-      if (readModePage(commandDataBlock.targetLUN, commandDataBlock.data[2], sizerequested, buf) == 0) {
+      if (readModePage(commandDataBlock.targetLUN, commandDataBlock.data[2], sizerequested, buf) != 0) {
          // transfer the data found
 
          // Set up the control signals ready for the data in phase
