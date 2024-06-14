@@ -12,9 +12,9 @@
 #include "ext_attributes.h"
 
 
-static const int MAX_PREFS_TOKEN_LEN = 255;
-static const int MAX_PREFS_VALUE_LEN = 511;
-static const int MAX_PREFS_LINE_LEN = MAX_PREFS_TOKEN_LEN + MAX_PREFS_VALUE_LEN+1;
+#define MAX_PREFS_TOKEN_LEN 25
+#define MAX_PREFS_VALUE_LEN 482
+#define MAX_PREFS_LINE_LEN (MAX_PREFS_TOKEN_LEN + MAX_PREFS_VALUE_LEN)
 
 // Token written to start of ext attributes files
 #define PREFS_TOKEN "# Drive Extended attributes - keep this line"
@@ -176,10 +176,25 @@ static uint8_t UserPage2[] =
  * Arguments:
  * token	- param name to be looked up
  * buf		- buffer for string value.
+ *
+ * returns length of data in buffer
+ * otherwise 0
  */
+
 uint16_t read_attribute(const char *token, char *buf) {
 
+	FIL fileObject;
+	FRESULT fsResult;
+
 	char msg[256];
+
+	char left[MAX_PREFS_TOKEN_LEN];
+	char right[MAX_PREFS_VALUE_LEN];
+	char *dlim_ptr, *end_ptr;
+	char fbuf[MAX_PREFS_LINE_LEN];
+
+	size_t token_length, value_length;
+
 /*
 	if (!token || (!buf)) {
 		if (debugFlag_extended_attributes) debugString_P(PSTR("ext_attributes: read_attribute: Invalid argument\r\n"));
@@ -191,8 +206,6 @@ uint16_t read_attribute(const char *token, char *buf) {
 		return 0;
 	}
 
-	FIL fileObject;
-	FRESULT fsResult;
 
 	// Debug output
 	if (debugFlag_extended_attributes) {
@@ -208,22 +221,23 @@ uint16_t read_attribute(const char *token, char *buf) {
 		return 0;
 	}
 
-	char left[MAX_PREFS_TOKEN_LEN];
-	char right[MAX_PREFS_VALUE_LEN];
-	char *dlim_ptr, *end_ptr;
-	char fbuf[MAX_PREFS_LINE_LEN];
-
 	if (debugFlag_extended_attributes) {
 		sprintf(msg, "ext_attributes: read_attribute: Attempting to find attribute '%s'\r\n", token);
 		debugString_P(PSTR(msg));
 	}
 
+//	TCHAR *fsgetResult;
+	
+//	fsgetResult = f_gets(fbuf, MAX_PREFS_LINE_LEN-1, &fileObject);
+//	if (debugFlag_extended_attributes) debugStringInt16_P(PSTR("ext_attributes: read_attribute: fsgetResult: "), (uint16_t)*fsgetResult, true);
+	
 	// loop through the file looking for the parameter
 	while (f_gets(fbuf, MAX_PREFS_LINE_LEN, &fileObject)) {
 
 		// Discard any lines that don't start with A-Z, a-z
-		if ( !(((fbuf[0] & 0xDF) >= 'A') && ((fbuf[0] & 0xDF) <= 'Z')))
+		if ( !(((fbuf[0] & 0xDF) >= 'A') && ((fbuf[0] & 0xDF) <= 'Z'))) {
 			continue;
+		}
 
 		if (debugFlag_extended_attributes) {
 			sprintf(msg, "ext_attributes: read_attribute: File read line: %s", fbuf);
@@ -241,7 +255,6 @@ uint16_t read_attribute(const char *token, char *buf) {
 			*right = '\0';
 
 			// get the token and the value from the line of data
-			size_t token_length, value_length;
 			token_length = (size_t)(dlim_ptr - fbuf);
 
 			if (token_length > MAX_PREFS_TOKEN_LEN){
@@ -391,7 +404,9 @@ uint8_t getInquiryData(uint8_t bytesRequested, uint8_t *buf, uint8_t LUN) {
 // Read a mode page, either from the extended attributes file
 // of from defaults if available
 //
-// Returns the status into the command block
+// Returns the length of the mode page data
+// otherwise 0 if unsuccessful
+
 uint8_t readModePage(uint8_t LUN, uint8_t Page, uint8_t PageLength, uint8_t *returnBuffer) {
 
 	uint8_t status = 0;
@@ -465,7 +480,7 @@ uint8_t readModePage(uint8_t LUN, uint8_t Page, uint8_t PageLength, uint8_t *ret
 		default:
 			if (debugFlag_scsiCommands) debugString_C(PSTR("ext_attributes: readModePage: Page Not Found Error\r\n"), DEBUG_ERROR);
 
-			status = 1;
+			status = 0;
 			break;
 	}
 
@@ -474,6 +489,9 @@ uint8_t readModePage(uint8_t LUN, uint8_t Page, uint8_t PageLength, uint8_t *ret
 }
 
 // Create the ModePage to return in the buffer
+//
+// returns 0 as unsuccessful
+// otherwise returns the total amount of data
 
 uint8_t getModePage(uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uint8_t *returnBuffer)
 {
@@ -493,12 +511,13 @@ uint8_t getModePage(uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uin
 	// Curently only handles Mode(6) and Mode(10) formats
 	// The difference is the size of the MP Header and the following LBA Descriptor
 
-	length = read_attribute("MPHeader", (char *)temp_buffer);
+	length = read_attribute("ModeParamHeader", (char *)temp_buffer);
 
+	// if no valid header length from the extended attributes
 	if ((length != 4) && (length !=8 )) {
 		if (debugFlag_extended_attributes) {
 			debugString_C(PSTR("ext_attributes: getModePage: Retrieving Mode Page Header.\r\n"), DEBUG_ERROR);
-			debugStringInt16_P(PSTR("ext_attributes: getModePage: Length of MPHeader :"), (uint16_t)length, true);
+			debugStringInt16_P(PSTR("ext_attributes: getModePage: Length of Mode Page Header :"), (uint16_t)length, true);
 			debugString_C(PSTR("ext_attributes: getModePage: Using default values for a 4byte Mode Page Header.\r\n"), DEBUG_INFO);
 		}
 
@@ -554,7 +573,7 @@ uint8_t getModePage(uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uin
 			break;
 		default: 
 			if (debugFlag_extended_attributes) debugStringInt16_P(PSTR("ext_attributes: getModePage: Invalid LBA length : "), (uint16_t)LBA_size, true);
-			return 1;
+			return 0;
 			break;
 		}
 	}
@@ -577,9 +596,9 @@ uint8_t getModePage(uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uin
 
 	// set up the name of the token to lookup
 	char token[10];
-	sprintf(token, "MPPage%d",Page);
+	sprintf(token, "ModePage%d",Page);
 
-	uint16_t all_modepagedata_length = read_attribute(token, temp_buffer);
+	uint16_t all_modepagedata_length = read_attribute(token, (char *)temp_buffer);
 	if (all_modepagedata_length)
 		DefaultValue = temp_buffer;
 
@@ -627,11 +646,13 @@ uint8_t getModePage(uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uin
 	// insert mode page data skipping the first 2 bytes of page and length
 	memcpy(returnBuffer+ptr, DefaultValue+2, modepagedata_length);
 
-//	ptr=(uint16_t)(ptr + modepagedata_length);
-	if (debugFlag_extended_attributes)	debugStringInt16_P(PSTR("ext_attributes: getModePage: pointer :"), (uint16_t)ptr, true);
+	// no more data to copy, so set pointer to the length of data
+	ptr=(uint8_t)(ptr + (modepagedata_length & 0xFF));
+
+	if (debugFlag_extended_attributes)	debugStringInt16_P(PSTR("ext_attributes: getModePage: new pointer :"), (uint16_t)ptr, true);
 
 	// Put the total data length in the header excluding the initial length byte
-	returnBuffer[0] = (uint8_t)((ptr + modepagedata_length-1) & 0xFF);
+	returnBuffer[0] = ptr-1;
 
 	// Show the current buffer data
 	if (debugFlag_extended_attributes) debugBuffer(returnBuffer, ptr-1);
@@ -639,7 +660,7 @@ uint8_t getModePage(uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uin
 	if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getModePage: Created Mode Page successfully.\r\n"), DEBUG_SUCCESS);
 	if (debugFlag_extended_attributes) debugStringInt16_P(PSTR("ext_attributes: getModePage: total packet length in buffer: "), (uint16_t)returnBuffer[0], true);
 
-	return 0;
+	return ptr;
 }
 
 
@@ -666,7 +687,7 @@ void ToHexString (char *hex, char *string) {
 
 	if (debugFlag_extended_attributes) {
 		char msg[256];
-		sprintf(msg, "ext_attributes: HexToString:%s in hex is '%s'.\n", hex, string);
+		sprintf(msg, "ext_attributes: HexToString:%s in hex is '%s'.\r\n", hex, string);
 		debugString_C(PSTR(msg), DEBUG_INFO);
 	}
 
@@ -719,7 +740,7 @@ bool ValidHexString(char *HexString) {
 
 			if (debugFlag_extended_attributes) {
 				char msg[100];
-				sprintf(msg, "ext_attributes: read_attribute:1 Invalid HEX character found: %d\r\n", HexString[i]);
+				sprintf(msg, "ext_attributes: read_attribute: Invalid HEX character found: '%d'\r\n", HexString[i]);
 				debugString_C(PSTR(msg), DEBUG_ERROR);
 			}
 			return (false);
