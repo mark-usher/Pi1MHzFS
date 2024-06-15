@@ -47,7 +47,9 @@
 
  Fall back to slow seeking if the LUN is too fragmented instead of just failing over.
 
- altered to allow variable sizes of Sectors per Track. The default is 33
+ altered to allow variable sizes of Sectors per Track. This supports drives that have been
+ connected on a ACB4070 which uses RLL encoding and allows a larger sector per track size.
+ The default is 33 sectors per track (MFM)
 */
 
 #include <stdbool.h>
