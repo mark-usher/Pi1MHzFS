@@ -235,8 +235,8 @@ void debugBuffer(const uint8_t *buffer, size_t length)
    debugString_P(PSTR("Debug: Buffer contents:\r\n"));
 
    for (size_t i = 0; i <= length; i++ ) {
-      debugStringInt16_P(PSTR("Debug:   Buffer["), i, false);
-      debugStringInt16_P(PSTR("] = "), buffer[i], true);
+      debugStringInt32_P(PSTR("Debug:   Buffer["), i, false);
+      debugStringInt32_P(PSTR("] = "), buffer[i], true);
    }
 
    // Note:
