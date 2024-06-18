@@ -85,5 +85,6 @@ void scsiInitialise(void);
 void scsiReset(void);
 
 void scsiProcessEmulation(void);
+uint8_t TransformLUN(uint8_t LUN);
 
 #endif /* SCSI_H_ */
