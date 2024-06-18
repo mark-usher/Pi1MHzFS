@@ -16,7 +16,6 @@ bool ValidHexString(char *buf);
 
 
 // Globals to track extended attributes
-extern bool extAttributes;
 extern char extAttributes_fileName[255];
 
 #endif /* EXT_ATTRIBUTES_H_ */
