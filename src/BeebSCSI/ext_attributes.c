@@ -100,15 +100,14 @@ static uint8_t FormatDevice[] =
 	DEFAULT_SECTORS_PER_TRACK & 0xFF00,		// Sectors per Track (MSB, LSB)
 	DEFAULT_SECTORS_PER_TRACK & 0xFF,		
 	0x01, 0x00,				// Data Bytes per Physical Sector (MSB, LSB)
-	0x00, 0x08,				// Interleave (MSB, LSB)
+	0x00, 0x01,				// Interleave (MSB, LSB)
 	0x00, 0x00,				// Track Skew Factor (MSB, LSB)
 	0x00, 0x00,				// Cylinder Skew Factor (MSB, LSB)						0	0
 	0x80,						// | b7 SSEC | b6 HSEC | b5 RMB | b4 SURF | b3-b0 Drive Type
 };	
 
 // Mode Page 4 - Rigid Disk Drive Geometry Parameters
-static uint8_t RigidDiskDriveGeometry[] =
-
+uint8_t RigidDiskDriveGeometry[] =
 {
 	0x04,						// Page Code	| b7 PS| b6 SPF| b5-b0 Page Code
 	0x04,						// Page Length (4)											
@@ -192,12 +191,15 @@ uint16_t read_attribute(const char *token, char *buf) {
 
 	size_t token_length, value_length;
 
-/*
-	if (!token || (!buf)) {
+	if ((!token) || (!buf)) {
 		if (debugFlag_extended_attributes) debugString_P(PSTR("ext_attributes: read_attribute: Invalid argument\r\n"));
-		return 1;
+		return 0;
 	}
-*/
+
+	if (debugFlag_extended_attributes) {
+		sprintf(msg, "ext_attributes: read_attribute: filename = %s.\r\n", extAttributes_fileName);
+		debugString_C(PSTR(msg), DEBUG_INFO);
+	}
 
 	fsResult = f_open(&fileObject, extAttributes_fileName, FA_READ);
 
@@ -341,7 +343,7 @@ uint8_t getInquiryData(uint8_t bytesRequested, uint8_t *buf, uint8_t LUN) {
 	if (filesystemCheckLunImage(LUN)) {
 
 		// if extended attributes are available
-		if (filesystemCheckExtAttributes(LUN)){
+		if (filesystemHasExtAttributes(LUN)){
 			if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getInquiryData: Extended attributes are available\r\n"), DEBUG_SUCCESS);
 
 			// read the attribute from the file
@@ -393,52 +395,55 @@ uint8_t readModePage(uint8_t LUN, uint8_t Page, uint8_t PageLength, uint8_t *ret
 
 	uint8_t status = 0;
 
-	// Which page has been requested? only b5-b0
+	// Which page has been requested? contained in b5-b0
 
 	switch (Page & 0x3F) {
 
 		case 1:		// Error Correction Status Parameters Page
 			// get page defaults
-			status=getModePage(ErrorCorrectionStatus, Page, PageLength, returnBuffer);
+			status=getModePage(LUN, ErrorCorrectionStatus, Page, PageLength, returnBuffer);
 			break;
 
 		case 3:		// Format Device Parameters Page
 			// get page defaults
-			status=getModePage(FormatDevice, Page, PageLength, returnBuffer);
+			status=getModePage(LUN, FormatDevice, Page, PageLength, returnBuffer);
 			break;
 
 		case 4:		// Rigid Disk Drive Geometry Parameters Page
-			status=getModePage(RigidDiskDriveGeometry, Page, PageLength, returnBuffer);
+
+			// set the default cylinders and heads to the value in the .dsc
+			filesystemGetCylHeadsFromDsc(LUN, RigidDiskDriveGeometry);
+			status=getModePage(LUN, RigidDiskDriveGeometry, Page, PageLength, returnBuffer);
 			break;
 
 		case 32:	// Serial Number Parameters Page
 			// get page defaults
-			status=getModePage(SerialNumber, Page, PageLength, returnBuffer);
+			status=getModePage(LUN, SerialNumber, Page, PageLength, returnBuffer);
 			break;
 
 		case 33:	// Manufacturer Parameters Page
 			// get page defaults
-			status=getModePage(Manufacturer, Page, PageLength, returnBuffer);
+			status=getModePage(LUN, Manufacturer, Page, PageLength, returnBuffer);
 			break;
 
 		case 35:	// System Flags Parameters Page
 			// get page defaults
-			status=getModePage(SystemFlags, Page, PageLength, returnBuffer);
+			status=getModePage(LUN, SystemFlags, Page, PageLength, returnBuffer);
 			break;
 
 		case 36:	// Undocumented Parameters Page
 			// get page defaults
-			status=getModePage(Page0x24, Page, PageLength, returnBuffer);
+			status=getModePage(LUN, Page0x24, Page, PageLength, returnBuffer);
 			break;
 
 		case 37:	// User Page 1
 			// get page defaults
-			status=getModePage(UserPage1, Page, PageLength, returnBuffer);
+			status=getModePage(LUN, UserPage1, Page, PageLength, returnBuffer);
 			break;
 
 		case 38:	// User Page 2
 			// get page defaults
-			status=getModePage(UserPage2, Page, PageLength, returnBuffer);
+			status=getModePage(LUN, UserPage2, Page, PageLength, returnBuffer);
 			break;
 
 		default:
@@ -452,18 +457,18 @@ uint8_t readModePage(uint8_t LUN, uint8_t Page, uint8_t PageLength, uint8_t *ret
 }
 
 // Create the ModePage to return in the buffer
-//
+// either from the extended attributes file or from default values
 // returns 0 as unsuccessful
 // otherwise returns the total amount of data
 
-uint8_t getModePage(uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uint8_t *returnBuffer)
+uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uint8_t *returnBuffer)
 {
 
-	uint16_t length;
+	uint16_t length = 0;
 	uint8_t ptr = 0;
 	uint16_t LBA_size;
 
-//	if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getModePage: Retrieving Mode Page data. Header.\r\n"), DEBUG_INFO);
+	if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getModePage: Retrieving Mode Page data. Header.\r\n"), DEBUG_INFO);
 
 	uint8_t temp_buffer[256];
 	memset(temp_buffer, 0x00 , 256);
@@ -473,28 +478,32 @@ uint8_t getModePage(uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uin
 	// Curently only handles Mode(6) and Mode(10) formats
 	// The difference is the size of the MP Header and the following LBA Descriptor
 
-	length = read_attribute("ModeParamHeader", (char *)temp_buffer);
+	if (filesystemHasExtAttributes(LUN))
+		length = read_attribute("ModeParamHeader", (char *)temp_buffer);
 
-	// if no valid header length from the extended attributes
-	if ((length != 4) && (length !=8 )) {
+	// otherwise length stays at 0 and default values are taken
+
+	// if valid header length from the extended attributes
+	if ((length == 4) || (length ==8 )) {
+		if (debugFlag_extended_attributes) {
+			debugString_C(PSTR("ext_attributes: getModePage: Mode Header read from disc successfully.\r\n"), DEBUG_SUCCESS);
+			debugStringInt16_P(PSTR("ext_attributes: getModePage: Length of Mode Page Header :"), (uint16_t)length, true);
+		}
+
+		memcpy(returnBuffer, temp_buffer, length);
+	}
+	else {
 		if (debugFlag_extended_attributes) {
 			debugString_C(PSTR("ext_attributes: getModePage: Retrieving Mode Page Header.\r\n"), DEBUG_ERROR);
 			debugStringInt16_P(PSTR("ext_attributes: getModePage: Length of Mode Page Header :"), (uint16_t)length, true);
 			debugString_C(PSTR("ext_attributes: getModePage: Using default values for a 4byte Mode Page Header.\r\n"), DEBUG_INFO);
 		}
 
-		// Get the header - 4 bytes
+		// Get the default header - 4 bytes
 		length = 4;
 		memcpy(returnBuffer, ModeParameterHeader6, length);
 	}
-	else {
-/*		if (debugFlag_extended_attributes) {
-			debugString_C(PSTR("ext_attributes: getModePage: Mode Header read from disc successfully.\r\n"), DEBUG_SUCCESS);
-			debugStringInt16_P(PSTR("ext_attributes: getModePage: Length of Mode Page Header :"), (uint16_t)length, true);
-		}
-*/
-		memcpy(returnBuffer, temp_buffer, length);
-	}
+
 
 	// get the size of the LBA Header
 	if (length == 4) {
@@ -510,11 +519,25 @@ uint8_t getModePage(uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uin
 
 	// ---------------------------------------------------------------------------------------------------------------------------------------
 	// read the LBA descriptor
-//	if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getModePage: Retrieving Mode Page LBA Descriptor.\r\n"), DEBUG_INFO);
+	if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getModePage: Retrieving Mode Page LBA Descriptor.\r\n"), DEBUG_INFO);
 
-	length = read_attribute("LBADescriptor", (char *)temp_buffer);
+	if (filesystemHasExtAttributes(LUN))
+		length = read_attribute("LBADescriptor", (char *)temp_buffer);
+	else
+		length = 0;
 
-	if (length != LBA_size) {
+	if (length == LBA_size) {
+		// expected  length retrieved from attributes file
+/*		if (debugFlag_extended_attributes) {
+			debugString_C(PSTR("ext_attributes: getModePage: LBA Descriptor read from disc successfully.\r\n"), DEBUG_SUCCESS);
+			debugStringInt16_P(PSTR("ext_attributes: getModePage: Length of LBA descriptor :"), (uint16_t)length, true);
+		}
+*/
+		memcpy(returnBuffer+ptr, temp_buffer, LBA_size);
+	}
+	else // invalid length size, use defaults.
+	{
+
 		if (debugFlag_extended_attributes) {
 			debugString_C(PSTR("ext_attributes: getModePage: Error Retrieving LBA descriptor.\r\n"), DEBUG_ERROR);
 			debugStringInt16_P(PSTR("ext_attributes: getModePage: Length of LBA descriptor :"), (uint16_t)length, true);
@@ -536,15 +559,6 @@ uint8_t getModePage(uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uin
 			break;
 		}
 	}
-	else {
-		// expected  length retrieved from attributes file
-/*		if (debugFlag_extended_attributes) {
-			debugString_C(PSTR("ext_attributes: getModePage: LBA Descriptor read from disc successfully.\r\n"), DEBUG_SUCCESS);
-			debugStringInt16_P(PSTR("ext_attributes: getModePage: Length of LBA descriptor :"), (uint16_t)length, true);
-		}
-*/
-		memcpy(returnBuffer+ptr, temp_buffer, LBA_size);
-	}
 
 	// update the pointer to the next position to place data at in the buffer
 	ptr = (uint8_t)((ptr + LBA_size) & 0xFF);
@@ -554,13 +568,21 @@ uint8_t getModePage(uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uin
 
 //	if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getModePage: Retrieving Mode Page Data.\r\n"), DEBUG_INFO);
 
-	// set up the name of the token to lookup
-	char token[10];
-	sprintf(token, "ModePage%d",Page);
+	if (filesystemHasExtAttributes(LUN)){
 
-	uint16_t all_modepagedata_length = read_attribute(token, (char *)temp_buffer);
-	if (all_modepagedata_length)
-		DefaultValue = temp_buffer;
+		// set up the name of the token to lookup
+		char token[10];
+		sprintf(token, "ModePage%d",Page);
+
+		// if read is successful swap the DefaultValue ptr to the return buffer
+
+		if (read_attribute(token, (char *)temp_buffer)) 		
+			DefaultValue = temp_buffer;
+
+	}
+
+	// Otherwise default attributes are being used	
+
 /*
 	if (debugFlag_extended_attributes) {
 		char msg[60];
