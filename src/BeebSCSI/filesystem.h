@@ -61,8 +61,10 @@ bool filesystemCheckLunDirectory(uint8_t lunDirectory);
 bool filesystemCheckLunImage(uint8_t lunNumber);
 
 bool filesystemCheckExtAttributes( uint8_t lunNumber);
+bool filesystemHasExtAttributes( uint8_t lunNumber);
 
 uint32_t filesystemGetLunSizeFromDsc(uint8_t lunNumber);
+uint8_t filesystemGetCylHeadsFromDsc( uint8_t lunNumber, uint8_t *returnbuf);
 bool filesystemCreateDscFromLunImage(uint8_t lunDirectory, uint8_t lunNumber, uint32_t lunFileSize);
 
 void filesystemGetUserCodeFromUcd(uint8_t lunDirectoryNumber, uint8_t lunNumber);

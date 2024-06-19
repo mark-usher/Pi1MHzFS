@@ -556,7 +556,8 @@ bool filesystemCheckLunImage(uint8_t lunNumber)
    return true;
 }
 
-
+// Check an extended attributes file is available for that LUN
+// and register it
 bool filesystemCheckExtAttributes( uint8_t lunNumber)
 {
 
@@ -591,6 +592,15 @@ bool filesystemCheckExtAttributes( uint8_t lunNumber)
 
 	return filesystemState.fsLunHasExtendedAttributes[lunNumber];
 }
+
+// Check if a LUN has registered extended attributes when it was started
+// and ensure the extAttributes filename is correct for the LUN
+bool filesystemHasExtAttributes( uint8_t lunNumber)
+{
+   sprintf(extAttributes_fileName, "/BeebSCSI%d/scsi%d.ext", filesystemState.lunDirectory, lunNumber);
+	return filesystemState.fsLunHasExtendedAttributes[lunNumber];
+}
+
 
 // Function to calculate the LUN image size from the LUN descriptor file parameters
 uint32_t filesystemGetLunSizeFromDsc( uint8_t lunNumber)
@@ -640,6 +650,43 @@ uint32_t filesystemGetLunSizeFromDsc( uint8_t lunNumber)
    return lunSize;
 }
 
+// Function to return the cylinders and heads from the LUN descriptor file parameters
+uint8_t filesystemGetCylHeadsFromDsc( uint8_t lunNumber, uint8_t *returnbuf)
+{
+   uint8_t rc = 0;
+   UINT fsCounter;
+   FRESULT fsResult;
+   FIL fileObject;
+
+   // Assemble the DSC file name
+   sprintf(fileName, "/BeebSCSI%d/scsi%d.dsc", filesystemState.lunDirectory, lunNumber);
+
+   fsResult = f_open(&fileObject, fileName, FA_READ);
+
+   if (fsResult == FR_OK) {
+      uint8_t Buffer[22];
+      // Read the DSC data
+      fsResult = f_read(&fileObject, Buffer, 22, &fsCounter);
+
+      // Check that the file was read OK and is the correct length
+      if (fsResult != FR_OK  || fsCounter != 22) {
+         // Something went wrong
+         if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemGetCylHeadsFromDsc(): ERROR: Could not read .dsc file\r\n"));
+         f_close(&fileObject);
+         return rc;
+      }
+
+		returnbuf[3] = Buffer[13];
+		returnbuf[4] = Buffer[14];
+		returnbuf[5] = Buffer[15];
+
+	   rc = 1;
+   }
+	
+   f_close(&fileObject);
+   return rc;
+
+}
 // Function to automatically create a DSC file based on the file size of the LUN image
 // Note, this function is specific to the BBC Micro and the ACB-4000 host adapter card
 // If the DSC is inaccurate then, for the BBC Micro, it's not that important, since the
@@ -665,7 +712,7 @@ bool filesystemCreateDscFromLunImage(uint8_t lunDirectory, uint8_t lunNumber, ui
    // Check that the LUN file size is actually a size which the ACB-4000 card could have supported (given that the
    // block and track sizes were fixed to 256 and a default of 33 respectively)
    if (lunFileSize % (256 * sectorsperTrack) != 0) {
-      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCreateDscFromLunImage(): WARNING: The LUN file size could not be supported by an ACB-4000 card\r\n"));
+      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCreateDscFromLunImage(): WARNING: The LUN file size could not be supported by an ACB-4000 card. Not divisible by 256.\r\n"));
    }
    lunFileSize = lunFileSize / (sectorsperTrack * 256);
 
