@@ -280,10 +280,6 @@ void scsiProcessEmulation(void)
       scsiState = scsiCommandStartStop();
       break;
 
-      case SCSI_CERTIFY:
-      scsiState = scsiCommandCertify();
-      break;
-
       case SCSI_VERIFY:
       scsiState = scsiCommandVerify();
       break;
@@ -329,6 +325,11 @@ void scsiProcessEmulation(void)
 
       case SCSI_BEEBSCSI_FATREAD:
       scsiState = scsiBeebScsiFatRead();
+      break;
+
+      // Handle Vendor specific group 7 commands
+      case SCSI_CERTIFY:
+      scsiState = scsiCommandCertify();
       break;
 
       default:
@@ -463,6 +464,10 @@ uint8_t scsiEmulationCommand(void)
       length = 6;
       break;
 
+      case 7:
+      length = 6;
+      break;
+
       default:
       length = 6; // guess at a length !
       if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: ERROR: BAD command group received\r\n"));
@@ -566,9 +571,6 @@ uint8_t scsiEmulationCommand(void)
          case 0x05:
          return SCSI_READCAPACITY;
          break;
-         case 0x0E:
-         return SCSI_CERTIFY;
-         break;
          case 0x0F:
          return SCSI_VERIFY;
          break;
@@ -614,6 +616,15 @@ uint8_t scsiEmulationCommand(void)
          break;
       }
    }
+   // Transition to command based on received opCode (group 7 Vendor specific commands)
+   if (group == 7) {
+      // Select group 7 command type
+      switch (opCode) {
+         case 0x02:
+         return SCSI_CERTIFY;
+         break;
+		}
+	}
 
    // Unrecognized command received!
    if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: ERROR: BAD opcode received - transitioning to bus free\r\n"));
@@ -1355,11 +1366,12 @@ static uint8_t scsiCommandTranslate(void)
 
    // Get the number of heads per cylinder (HPC)
    headsPerCylinder = (uint32_t)Buffer[15]; // Data head count
+	uint32_t sectorsperTrack = filesystemGetLunSPTSize(commandDataBlock.targetLUN);
 
    // Convert LBA to CHS
    cylinderNumber = logicalBlockAddress / (headsPerCylinder * sectorsperTrack);
    headNumber = (logicalBlockAddress / sectorsperTrack) % headsPerCylinder;
-   bytesFromIndex = ((logicalBlockAddress % sectorsperTrack) + 1) * 256; // Sector number * block size (256)
+   bytesFromIndex = ((logicalBlockAddress % sectorsperTrack) + 1) * filesystemGetLunBlockSize(commandDataBlock.targetLUN); // Sector number * block size
 
    if (debugFlag_scsiCommands) {
       debugStringInt32_P(PSTR("SCSI Commands:   LBA = "), logicalBlockAddress, true);
@@ -1375,15 +1387,15 @@ static uint8_t scsiCommandTranslate(void)
 
    // Send the translation data to the host
    hostadapterWriteByte((uint8_t)((cylinderNumber & 0xFF0000) >> 16));     // Cylinder number MSB
-   hostadapterWriteByte((uint8_t)((cylinderNumber & 0xFF00) >> 8));     // Cylinder number
-   hostadapterWriteByte((uint8_t)(cylinderNumber & 0xFF));              // Cylinder number LSB
+   hostadapterWriteByte((uint8_t)((cylinderNumber & 0xFF00) >> 8));     	// Cylinder number
+   hostadapterWriteByte((uint8_t)(cylinderNumber & 0xFF));              	// Cylinder number LSB
 
-   hostadapterWriteByte((uint8_t)headNumber);                        // Head number
+   hostadapterWriteByte((uint8_t)headNumber);                        		// Head number
 
    hostadapterWriteByte((uint8_t)((bytesFromIndex & 0xFF000000) >> 24));   // Bytes from index MSB
    hostadapterWriteByte((uint8_t)((bytesFromIndex & 0x00FF0000) >> 16));   // Bytes from index
-   hostadapterWriteByte((uint8_t)((bytesFromIndex & 0x0000FF00) >> 8)); // Bytes from index
-   hostadapterWriteByte((uint8_t)( bytesFromIndex & 0x000000FF));       // Bytes from index LSB
+   hostadapterWriteByte((uint8_t)((bytesFromIndex & 0x0000FF00) >> 8)); 	// Bytes from index
+   hostadapterWriteByte((uint8_t)( bytesFromIndex & 0x000000FF));       	// Bytes from index LSB
 
    // Indicate successful command in status and message
    commandDataBlock.status = 0x00; // 0x00 = Good
@@ -1618,19 +1630,6 @@ static uint8_t scsiCommandStartStop(void)
    return SCSI_STATUS;
 }
 
-
-// SCSI Command (0x2E) Write and Verify
-//
-// Adaptec ACB-4000 Manual notes:
-static uint8_t scsiCommandCertify(void)
-{
-
-	// Indicate successful command in status and message
-	commandDataBlock.status = 0x00; // 0x00 = Good
-
-   return SCSI_STATUS;
-}
-
 // SCSI Command (0x2F) Verify
 //
 // Adaptec ACB-4000 Manual notes:
@@ -1646,6 +1645,10 @@ static uint8_t scsiCommandCertify(void)
 //
 // Note: This function is used by the *VERIFY command provided in the
 //       library directory of the BBC Master welcome disc
+//
+// This implementation only verifies the LUN is available, and the LBAs 
+// given are within range on the LUN.
+//
 static uint8_t scsiCommandVerify(void)
 {
    uint32_t logicalBlockAddress = 0;
@@ -2277,6 +2280,31 @@ static uint8_t scsiBeebScsiFatRead(void)
    // Transition to the successful state
    return SCSI_STATUS;
 }
+
+// SCSI Command Certify (group 7 - command 0xE2)
+//
+// This is a RODIME vendor specific command.
+//
+// No infornmation what this does on the RODIME drives. A 6 byte cmd block is 
+// passed,  &E2, LUN , 0 , Timeout Value , 0 , 0
+static uint8_t scsiCommandCertify(void)
+{
+
+   if (debugFlag_scsiCommands) {
+      debugString_P(PSTR("SCSI Commands: RODIME Certify command (G7 0xE2) received\r\n"));
+      debugStringInt16_P(PSTR("SCSI Commands: Target LUN = "), commandDataBlock.targetLUN, true);
+      debugStringInt16_P(PSTR("SCSI Commands: Timeout = "), commandDataBlock.data[3], true);
+   }
+
+   // Indicate successful command in status and message
+   commandDataBlock.status = 0x00; // 0x00 = Good
+
+   return SCSI_STATUS;
+}
+
+
+
+
 
 // The BBC and Master ADFS appear to use:
 // Drive 0 : Host Indentifier = 1 LUN = 0
