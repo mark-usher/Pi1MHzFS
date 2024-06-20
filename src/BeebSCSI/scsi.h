@@ -35,34 +35,34 @@
 // SCSI emulation bus states
 #define SCSI_BUSFREE	0
 #define SCSI_COMMAND	1
-#define SCSI_STATUS		2
+#define SCSI_STATUS	2
 #define SCSI_MESSAGE	3
 
 // SCSI emulation command states (Group 0 commands)
-#define SCSI_TESTUNITREADY	10
-#define SCSI_REZEROUNIT		11
-#define SCSI_REQUESTSENSE	12
-#define SCSI_FORMAT			13
-#define SCSI_READ6			14
-#define SCSI_WRITE6			15
-#define SCSI_SEEK			16
-#define SCSI_TRANSLATE		17
-#define SCSI_MODESELECT		18
-#define SCSI_MODESENSE		19
-#define SCSI_STARTSTOP		20
-#define SCSI_INQUIRY		21
+#define SCSI_TESTUNITREADY		10
+#define SCSI_REZEROUNIT			11
+#define SCSI_REQUESTSENSE		12
+#define SCSI_FORMAT				13
+#define SCSI_READ6				14
+#define SCSI_WRITE6				15
+#define SCSI_SEEK					16
+#define SCSI_TRANSLATE			17
+#define SCSI_MODESELECT6		18
+#define SCSI_MODESENSE6			19
+#define SCSI_STARTSTOP			20
+#define SCSI_INQUIRY				21
 #define SCSI_SENDDIAGNOSTIC	22
 
 // SCSI emulation command states (Group 1 commands)
-#define SCSI_VERIFY			23
-#define SCSI_READCAPACITY   24
+#define SCSI_VERIFY				23
+#define SCSI_READCAPACITY		24
 
 // SCSI emulation command states (LV-DOS Group 6 commands)
-#define SCSI_WRITE_FCODE	30
-#define SCSI_READ_FCODE		31
+#define SCSI_WRITE_FCODE		30
+#define SCSI_READ_FCODE			31
 
 // SCSI emulation command states (BeebSCSI Group 6 commands)
-#define SCSI_BEEBSCSI_SENSE		40
+#define SCSI_BEEBSCSI_SENSE	40
 #define SCSI_BEEBSCSI_SELECT	41
 #define SCSI_BEEBSCSI_FATPATH	42
 #define SCSI_BEEBSCSI_FATINFO	43
