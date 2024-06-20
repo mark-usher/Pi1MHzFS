@@ -1037,50 +1037,14 @@ bool filesystemWriteLunDescriptor(uint8_t lunNumber, uint8_t const buffer[])
 // Function to format a LUN image
 bool filesystemFormatLun(uint8_t lunNumber, uint8_t dataPattern)
 {
-   uint32_t requiredNumberOfSectors = 0;
    FIL fileObject;
    FRESULT fsResult;
-   uint8_t Buffer[24];
 
    if (debugFlag_filesystem) debugStringInt16_P(PSTR("File system: filesystemFormatLun(): Formatting LUN image "), lunNumber, true);
 
    filesystemSetLunStatus(lunNumber, false );
 
-   // Read the LUN descriptor for the LUN image into the sector buffer
-   if (!filesystemReadLunDescriptor(lunNumber, Buffer)) {
-      // Unable to read the LUN descriptor
-      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemFormatLun(): ERROR: Could not read .dsc file for LUN\r\n"));
-      return false;
-   }
-
-	// get values from .dsc
-
-   // Calculate the number of 256 byte sectors required to fulfill the drive geometry
-   // tracks = heads * cylinders
-   // sectors = tracks * sectorsperTrack
-   requiredNumberOfSectors = ((uint32_t)Buffer[15] * (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14])) * sectorsperTrack;
-
-	if (filesystemHasExtAttributes(lunNumber)) {
-		// get values from extended attributes
-		if (readModePage(lunNumber, 3, 24, Buffer) !=0) {
-			sectorsperTrack = (uint16_t)((Buffer[22] << 8) + Buffer[23]);
-			if (debugFlag_filesystem) debugStringInt32_P(PSTR("File system: filesystemFormatLun(): Sectors per Track = "), sectorsperTrack, true);
-		}
-		else
-		{
-			sectorsperTrack = DEFAULT_SECTORS_PER_TRACK;
-		}
-
-		if (readModePage(lunNumber, 4, 24, Buffer) !=0) {
-			// Calculate the number of 256 byte sectors required to fulfill the drive geometry
-			// tracks = heads * cylinders
-			// sectors = tracks * sectorsperTrack
-
-			requiredNumberOfSectors = (uint32_t)((uint8_t)(Buffer[17]) * ((uint16_t)((Buffer[15] << 8) + (uint8_t)Buffer[16])) * sectorsperTrack);
-		}
-	}
-
-   if (debugFlag_filesystem) debugStringInt32_P(PSTR("File system: filesystemFormatLun(): Sectors required = "), requiredNumberOfSectors, true);
+   if (debugFlag_filesystem) debugStringInt32_P(PSTR("File system: filesystemFormatLun(): Sectors required = "), filesystemGetLunTotalSectors(lunNumber), true);
 
    // Assemble the .dat file name
    sprintf(fileName, "/BeebSCSI%d/scsi%d.dat", filesystemState.lunDirectory, lunNumber);
@@ -1110,7 +1074,7 @@ bool filesystemFormatLun(uint8_t lunNumber, uint8_t dataPattern)
       //
       // This ignores the data pattern (since the file is only allocated - not
       // actually written).
-      fsResult = f_expand(&fileObject /*&filesystemState.fileObject[lunNumber]*/, (FSIZE_t)(requiredNumberOfSectors * 256), 1);
+      fsResult = f_expand(&fileObject /*&filesystemState.fileObject[lunNumber]*/, (FSIZE_t)(filesystemGetLunTotalBytes(lunNumber)), 1);
 
       if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemFormatLun(): Format complete\r\n"));
 
