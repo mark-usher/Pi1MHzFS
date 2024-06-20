@@ -377,8 +377,10 @@ uint8_t readModePage(uint8_t LUN, uint8_t Page, uint8_t PageLength, uint8_t *ret
 
 	// This is ignored and the current values are always returned
 
+	Page = Page & 0x3F;
+
 	// Which page has been requested? contained in b5-b0
-	switch (Page & 0x3F) {
+	switch (Page) {
 
 		case 1:		// Error Correction Status Parameters Page
 			// get page defaults
@@ -567,6 +569,9 @@ uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t Pa
 		debugStringInt16_P(PSTR("ext_attributes: getModePage: Full Page Data length :"), (uint16_t)all_modepagedata_length, true);
 	}
 */
+
+	if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getModePage: Using default values for the page data.\r\n"), DEBUG_INFO);
+
 	uint16_t modepagedata_length = (DefaultValue[1]);
 
 	// Max page length in Mode6 is 241 bytes (255 - 4 (header) - 8 (LBA) - 2 (page header))
@@ -615,7 +620,7 @@ uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t Pa
 	// Show the current buffer data
 //	if (debugFlag_extended_attributes) debugBuffer(returnBuffer, ptr-1);
 
-	if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getModePage: Created Mode Page successfully.\r\n"), DEBUG_SUCCESS);
+	if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getModePage: Mode Page read successfully.\r\n"), DEBUG_SUCCESS);
 //	if (debugFlag_extended_attributes) debugStringInt16_P(PSTR("ext_attributes: getModePage: total packet length in buffer: "), (uint16_t)returnBuffer[0], true);
 
 	return ptr;
@@ -629,7 +634,7 @@ uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t Pa
 uint8_t writeModePage(uint8_t LUN, uint8_t *Data) {
 
 	uint8_t status = 0;
-	uint8_t Page = Data[0];
+	uint8_t Page = Data[0] & 0x3F;
 	uint8_t PageLength = Data[1];
 
 	if (debugFlag_extended_attributes) {
@@ -639,7 +644,7 @@ uint8_t writeModePage(uint8_t LUN, uint8_t *Data) {
 	}
 
 	// Which page has been requested? contained in b5-b0
-	switch (Page & 0x3F) {
+	switch (Page) {
 
 		case 1:		// Error Correction Status Parameters Page
 			if (PageLength==0)
@@ -719,7 +724,7 @@ uint8_t writeModePage(uint8_t LUN, uint8_t *Data) {
 uint8_t setModePage(uint8_t LUN, uint8_t *Data) {
 
 	uint8_t byteCounter;
-	uint8_t Page=Data[0];
+	uint8_t Page=Data[0] & 0x3F;
 	uint8_t DataLength=Data[1];
 
 	if (debugFlag_extended_attributes) {
