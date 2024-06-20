@@ -690,9 +690,15 @@ uint32_t filesystemGetLunSizeFromDsc( uint8_t lunNumber)
       if (debugFlag_filesystem) debugLunDescriptor(Buffer);
 
 		// read the parameters into the cache
-		(*ptr).BlockSize = (((uint32_t)Buffer[9] << 16) + ((uint32_t)Buffer[10] << 8) + (uint32_t)Buffer[11]);
-		(*ptr).Cylinders = (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14]);
-		(*ptr).Heads = (uint8_t)Buffer[15];
+		(*ptr).BlockSize 	= (((uint32_t)Buffer[9] << 16) |
+		                     ((uint32_t)Buffer[10] << 8) | 
+								    (uint32_t)Buffer[11]);
+
+		(*ptr).Cylinders 	= (((uint32_t)Buffer[13] << 8) |
+		                      (uint32_t)Buffer[14]);
+
+		(*ptr).Heads 		=  (uint8_t)Buffer[15];
+
 		(*ptr).SectorsPerTrack = DEFAULT_SECTORS_PER_TRACK;			// .dsc files don't contain sectors per track, always assume the default
 
       lunSize = filesystemGetLunTotalBytes(lunNumber);
