@@ -56,6 +56,7 @@
 // SCSI emulation command states (Group 1 commands)
 #define SCSI_VERIFY				23
 #define SCSI_READCAPACITY		24
+#define SCSI_READDEFECTDATA10 25
 
 // SCSI emulation command states (Group 7 commands)
 // vendor unique

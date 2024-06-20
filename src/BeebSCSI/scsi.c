@@ -125,6 +125,7 @@ static uint8_t scsiCommandStartStop(void);
 static uint8_t scsiCommandCertify(void);
 static uint8_t scsiCommandVerify(void);
 static uint8_t scsiCommandReadCapacity(void);
+static uint8_t scsiCommandReadDefectData10(void);
 static uint8_t scsiCommandInquiry(void);
 static uint8_t scsiCommandSendDiagnostic(void);
 
@@ -288,6 +289,10 @@ void scsiProcessEmulation(void)
       scsiState = scsiCommandReadCapacity();
       break;
 
+		case SCSI_READDEFECTDATA10:
+		scsiState = scsiCommandReadDefectData10();
+		break;
+
       case SCSI_INQUIRY:
       scsiState = scsiCommandInquiry();
       break;
@@ -433,6 +438,7 @@ static uint8_t scsiEmulationBusFree(void)
 }
 
 // SCSI Command state
+// Validates the command sent and returns the command
 uint8_t scsiEmulationCommand(void)
 {
    uint8_t commandDataBlockPointer = 0;
@@ -574,6 +580,9 @@ uint8_t scsiEmulationCommand(void)
          case 0x0F:
          return SCSI_VERIFY;
          break;
+         case 0x17:
+         return SCSI_READDEFECTDATA10;
+         break;
       }
    }
 #ifdef FCODE
@@ -628,7 +637,13 @@ uint8_t scsiEmulationCommand(void)
 
    // Unrecognized command received!
    if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: ERROR: BAD opcode received - transitioning to bus free\r\n"));
-   return SCSI_BUSFREE;
+//   return SCSI_BUSFREE;
+
+	// prevent the requestor from potentially hanging if it sends an unknown command
+	// Indicate unsuccessful command in status and message
+	commandDataBlock.status = (commandDataBlock.targetLUN << 5) | 0x02;      // 0x02 = Bad
+   return SCSI_STATUS;
+
 }
 
 // SCSI status state
@@ -1656,7 +1671,7 @@ static uint8_t scsiCommandVerify(void)
 
    if (debugFlag_scsiCommands) {
       debugString_P(PSTR("SCSI Commands: VERIFY command (0x2F) received\r\n"));
-      debugStringInt16_P(PSTR("SCSI Commands: Target LUN = "), commandDataBlock.targetLUN, false);
+      debugStringInt16_P(PSTR("SCSI Commands: Target LUN = "), commandDataBlock.targetLUN, true);
    }
 
    // Make sure the target LUN is started
@@ -1714,11 +1729,29 @@ static uint8_t scsiCommandVerify(void)
    return SCSI_STATUS;
 }
 
+// SCSI Command (0x25) Read Capacity
+//
+// Adaptec ACB-4000 Manual notes:
+//
+// If the Partial Media Indicator (PMI) is 00 hex, this command will
+// return the address of the last block on the unit. It is not 
+// necessary to specify a starting block address in this command
+// mode. If PMI is 01 hex, this command will return the 
+// address of the block (after the specified starting address)
+// at which a substantial delay of time in data transfer will be
+// encountered (e.g., a cylinder boundary). Any calue other than
+// 00 hex or 01 hex in bute 08 will cause Check Status with an 
+// error code of 24 hex for an invalid argument.
+//
+// In both cases, an eight-byte data field is returned. The first
+// four bytes are defined as the block address and the last four
+// bytes are the block size.
+//
 static uint8_t scsiCommandReadCapacity(void)
 {
    if (debugFlag_scsiCommands) {
       debugString_P(PSTR("SCSI Commands: Read Capacity command (0x25) received\r\n"));
-      debugStringInt16_P(PSTR("SCSI Commands: Target LUN = "), commandDataBlock.targetLUN, false);
+      debugStringInt16_P(PSTR("SCSI Commands: Target LUN = "), commandDataBlock.targetLUN, true);
    }
 
    // Make sure the target LUN is started
@@ -1748,6 +1781,44 @@ static uint8_t scsiCommandReadCapacity(void)
    hostadapterWriteByte((uint8_t)((blocksize & 0x00FF0000) >> 16));  // Bytes from index
    hostadapterWriteByte((uint8_t)((blocksize & 0x0000FF00) >>  8));  // Bytes from index
    hostadapterWriteByte((uint8_t)( blocksize & 0x000000FF));         // Bytes from index LSB
+
+   // Indicate successful command in status and message
+   commandDataBlock.status = 0x00; // 0x00 = Good
+   return SCSI_STATUS;
+}
+
+// SCSI Command (0x37) Read Defect Data10
+//
+// The READ DEFECT DATA (10) command requests that the device server transfers 
+// the medium defect data to the data-in buffer.
+// In our case this will always be no defects.
+//
+static uint8_t scsiCommandReadDefectData10(void)
+{	
+   if (debugFlag_scsiCommands) {
+      debugString_P(PSTR("SCSI Commands: Read Defect Data(10) command (0x37) received\r\n"));
+      debugStringInt16_P(PSTR("SCSI Commands: Target LUN = "), commandDataBlock.targetLUN, true);
+   }
+
+   // Make sure the target LUN is started
+   if (!filesystemReadLunStatus(commandDataBlock.targetLUN)) {
+      // LUN unavailable... return with error status
+      if (debugFlag_scsiCommands) debugStringInt16_P(PSTR("\r\nSCSI Commands: Unavailable LUN #"), commandDataBlock.targetLUN, true);
+      commandDataBlock.status = (uint8_t)(commandDataBlock.targetLUN << 5) | 0x02; // 0x02 = Bad
+
+      return SCSI_STATUS;
+   }
+
+	// return no defects
+
+	// Set up the control signals ready for the data in phase
+	scsiInformationTransferPhase(ITPHASE_DATAIN);
+
+	// send back a 4 byte header
+	hostadapterWriteByte(0);									// Reserved
+	hostadapterWriteByte(commandDataBlock.data[2]);		// b7-b4 Reserved | b4 PLISTV | b3 GLISTV | b2-b0 Defect List Format
+	hostadapterWriteByte(0);									// Defect List Length N-3 MSB
+	hostadapterWriteByte(0);									// Defect List Length N-3 MSB
 
    // Indicate successful command in status and message
    commandDataBlock.status = 0x00; // 0x00 = Good
