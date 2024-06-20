@@ -567,8 +567,18 @@ bool filesystemCheckLunImage(uint8_t lunNumber)
 
 	filesystemCheckExtAttributes(lunNumber);
 
+	// Calculate the LUN size from the extended attributes file
+	uint32_t lunDscSize = filesystemGetLunTotalBytes(lunNumber);
+	if (debugFlag_filesystem) debugStringInt32_P(PSTR("File system: filesystemCheckLunImage(): LUN size in bytes (according to .ext) = "), lunDscSize, 1);
+
+	// Are the file size and DSC size consistent?
+	if (lunDscSize != lunFileSize) {
+		if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckLunImage(): WARNING: File size and EXT parameters are NOT consistent\r\n"));
+	}
+
    // Exit with success
    if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckLunImage(): Successful\r\n"));
+
    return true;
 }
 
@@ -602,6 +612,36 @@ bool filesystemCheckExtAttributes( uint8_t lunNumber)
 		filesystemState.fsLunHasExtendedAttributes[lunNumber] = true;
 
    }
+
+	// Update the cached geomety for this LUN from the extended attributes
+   uint8_t Buffer[24];
+
+	// Try read page 3
+	if (readModePage(lunNumber, 3, 24, Buffer) !=0) {
+		filesystemState.fsLunGeometry[lunNumber].BlockSize = (uint32_t)(((Buffer[9] << 16) + (Buffer[10] << 8) + Buffer[11]) & 0x00FFFFFF);
+		filesystemState.fsLunGeometry[lunNumber].SectorsPerTrack = (uint32_t)(((Buffer[22] << 8) + Buffer[23]) & 0x0000FFFF);
+	}
+	else
+	{
+		filesystemState.fsLunGeometry[lunNumber].SectorsPerTrack = DEFAULT_SECTORS_PER_TRACK;
+		// write with mode select
+	}
+
+	if (readModePage(lunNumber, 4, 18, Buffer) !=0) {
+		// Calculate the number of (block size) byte sectors required to fulfill the drive geometry
+		// tracks = heads * cylinders
+		// sectors = tracks * sectorsperTrack
+		filesystemState.fsLunGeometry[lunNumber].BlockSize = (uint32_t)(((Buffer[9] << 16) + (Buffer[10] << 8) + Buffer[11]) & 0x00FFFFFF);
+		filesystemState.fsLunGeometry[lunNumber].Cylinders = (uint32_t)(((Buffer[9] << 14) + (Buffer[15] << 8) + Buffer[16]) & 0x00FFFFFF);
+		filesystemState.fsLunGeometry[lunNumber].Heads = (uint8_t)(Buffer[17]);
+	}
+	else
+	{
+		filesystemState.fsLunGeometry[lunNumber].BlockSize = DEFAULT_BLOCK_SIZE;
+		// try and calculate cylinders / heads automatically
+
+		// write with mode select
+	}
 
 	// Close the .ext file
 	f_close(&fileObject);
@@ -649,20 +689,12 @@ uint32_t filesystemGetLunSizeFromDsc( uint8_t lunNumber)
       // Interpret the DSC information and calculate the LUN size
       if (debugFlag_filesystem) debugLunDescriptor(Buffer);
 
+		// read the parameters into the cache
 		(*ptr).BlockSize = (((uint32_t)Buffer[9] << 16) + ((uint32_t)Buffer[10] << 8) + (uint32_t)Buffer[11]);
 		(*ptr).Cylinders = (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14]);
 		(*ptr).Heads = (uint8_t)Buffer[15];
-		(*ptr).SectorsPerTrack = DEFAULT_SECTORS_PER_TRACK;			// .dsc files don't contain sectors per track, always assume default
+		(*ptr).SectorsPerTrack = DEFAULT_SECTORS_PER_TRACK;			// .dsc files don't contain sectors per track, always assume the default
 
-      // Note:
-      //
-      // The drive size (actual data storage) is calculated by the following formula:
-      //
-      // tracks = heads * cylinders
-      // sectors = tracks * sectors per track
-      // (the default '33' is because SuperForm uses a 2:1 interleave format with 33 sectors per
-      // track (F-2 in the ACB-4000 manual))
-      // bytes = sectors * block size (block size is always 256 bytes)
       lunSize = filesystemGetLunTotalBytes(lunNumber);
 
       f_close(&fileObject);
@@ -686,9 +718,14 @@ uint32_t filesystemGetLunTotalBytes( uint8_t lunNumber)
 	// pointer to the geometry data of the LUN
 	struct HDGeometry* ptr = &filesystemState.fsLunGeometry[lunNumber];
 
+	// The drive size (actual data storage) is calculated by the following formula:
+	//
 	// Tracks = Cylinders * Heads
 	// Total Sectors = Tracks * Sectors per Track 
-	// Total Bytes = Total Sectors * Block Size
+	// (the default '33' is because SuperForm uses a 2:1 interleave format with 33 sectors per
+	// track (F-2 in the ACB-4000 manual))
+	// Total Bytes = Total Sectors * Block Size (block size is normally 256 bytes)
+
 	return (((*ptr).Heads * (*ptr).Cylinders) * (*ptr).SectorsPerTrack) * (*ptr).BlockSize;
 }
 
@@ -705,42 +742,13 @@ uint32_t filesystemGetLunTotalSectors( uint8_t lunNumber)
 }
 
 // Function to return the cylinders and heads from the LUN descriptor file parameters
+// into the buffer
 //
-uint8_t filesystemGetCylHeadsFromDsc( uint8_t lunNumber, uint8_t *returnbuf)
+void filesystemGetCylHeads( uint8_t lunNumber, uint8_t *returnbuf)
 {
-   uint8_t rc = 0;
-   UINT fsCounter;
-   FRESULT fsResult;
-   FIL fileObject;
-
-   // Assemble the DSC file name
-   sprintf(fileName, "/BeebSCSI%d/scsi%d.dsc", filesystemState.lunDirectory, lunNumber);
-
-   fsResult = f_open(&fileObject, fileName, FA_READ);
-
-   if (fsResult == FR_OK) {
-      uint8_t Buffer[22];
-      // Read the DSC data
-      fsResult = f_read(&fileObject, Buffer, 22, &fsCounter);
-
-      // Check that the file was read OK and is the correct length
-      if (fsResult != FR_OK  || fsCounter != 22) {
-         // Something went wrong
-         if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemGetCylHeadsFromDsc(): ERROR: Could not read .dsc file\r\n"));
-         f_close(&fileObject);
-         return rc;
-      }
-
-		returnbuf[3] = Buffer[13];
-		returnbuf[4] = Buffer[14];
-		returnbuf[5] = Buffer[15];
-
-	   rc = 1;
-   }
-	
-   f_close(&fileObject);
-   return rc;
-
+	returnbuf[3] = ((uint8_t)((filesystemState.fsLunGeometry[lunNumber].Cylinders & 0x0000FF00) >> 8));
+	returnbuf[4] = ((uint8_t) (filesystemState.fsLunGeometry[lunNumber].Cylinders & 0x000000FF));
+	returnbuf[5] = filesystemState.fsLunGeometry[lunNumber].Heads;
 }
 
 // Function to automatically create a DSC file based on the file size of the LUN image

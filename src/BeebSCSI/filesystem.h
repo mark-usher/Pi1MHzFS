@@ -39,6 +39,7 @@
 // ACB-4070 which Acorn used in the FileStore product uses RLL encoding and
 // allows for a higher density of sectors per track.
 #define DEFAULT_SECTORS_PER_TRACK 33	
+#define DEFAULT_BLOCK_SIZE 256
 
 extern uint16_t sectorsperTrack;
 
@@ -65,11 +66,11 @@ bool filesystemHasExtAttributes( uint8_t lunNumber);
 
 uint32_t filesystemGetLunSizeFromDsc(uint8_t lunNumber);
 
-uint32_t filesystemGetLunBlockSize( uint8_t lunNumber);
+void filesystemGetCylHeads( uint8_t lunNumber, uint8_t *returnbuf);
+uint32_t filesystemGetLunBlockSize(uint8_t lunNumber);
 uint32_t filesystemGetLunTotalSectors(uint8_t lunNumber);
 uint32_t filesystemGetLunTotalBytes(uint8_t lunNumber);
 
-uint8_t filesystemGetCylHeadsFromDsc( uint8_t lunNumber, uint8_t *returnbuf);
 bool filesystemCreateDscFromLunImage(uint8_t lunDirectory, uint8_t lunNumber, uint32_t lunFileSize);
 
 void filesystemGetUserCodeFromUcd(uint8_t lunDirectoryNumber, uint8_t lunNumber);

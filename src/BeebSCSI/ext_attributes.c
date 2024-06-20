@@ -393,7 +393,7 @@ uint8_t readModePage(uint8_t LUN, uint8_t Page, uint8_t PageLength, uint8_t *ret
 		case 4:		// Rigid Disk Drive Geometry Parameters Page
 
 			// set the default cylinders and heads to the value in the .dsc
-			filesystemGetCylHeadsFromDsc(LUN, RigidDiskDriveGeometry);
+			filesystemGetCylHeads(LUN, RigidDiskDriveGeometry);
 			status=getModePage(LUN, RigidDiskDriveGeometry, Page, PageLength, returnBuffer);
 			break;
 
@@ -658,7 +658,7 @@ uint8_t writeModePage(uint8_t LUN, uint8_t *Data) {
 		case 4:		// Rigid Disk Drive Geometry Parameters Page
 			if (PageLength==0) {
 				// set the default cylinders and heads to the value in the .dsc if available
-				filesystemGetCylHeadsFromDsc(LUN, RigidDiskDriveGeometry);
+				filesystemGetCylHeads(LUN, RigidDiskDriveGeometry);
 				status=setModePage(LUN, RigidDiskDriveGeometry);
 			}
 			else
