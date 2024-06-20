@@ -558,7 +558,9 @@ uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t Pa
 
 		if (read_attribute(token, (char *)temp_buffer)) 		
 			DefaultValue = temp_buffer;
-
+		else {
+			if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getModePage: Using default values for the page data.\r\n"), DEBUG_INFO);
+		}
 	}
 
 	// Otherwise default attributes are being used	
@@ -571,8 +573,6 @@ uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t Pa
 		debugStringInt16_P(PSTR("ext_attributes: getModePage: Full Page Data length :"), (uint16_t)all_modepagedata_length, true);
 	}
 */
-
-	if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: getModePage: Using default values for the page data.\r\n"), DEBUG_INFO);
 
 	uint16_t modepagedata_length = (DefaultValue[1]);
 
