@@ -54,8 +54,9 @@
 #define SCSI_SENDDIAGNOSTIC	22
 
 // SCSI emulation command states (Group 1 commands)
-#define SCSI_VERIFY				23
-#define SCSI_READCAPACITY		24
+#define SCSI_CERTIFY				23
+#define SCSI_VERIFY				24
+#define SCSI_READCAPACITY		25
 
 // SCSI emulation command states (LV-DOS Group 6 commands)
 #define SCSI_WRITE_FCODE		30

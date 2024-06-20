@@ -122,6 +122,7 @@ static uint8_t scsiCommandTranslate(void);
 static uint8_t scsiCommandModeSelect6(void);
 static uint8_t scsiCommandModeSense6(void);
 static uint8_t scsiCommandStartStop(void);
+static uint8_t scsiCommandCertify(void);
 static uint8_t scsiCommandVerify(void);
 static uint8_t scsiCommandReadCapacity(void);
 static uint8_t scsiCommandInquiry(void);
@@ -277,6 +278,10 @@ void scsiProcessEmulation(void)
 
       case SCSI_STARTSTOP:
       scsiState = scsiCommandStartStop();
+      break;
+
+      case SCSI_CERTIFY:
+      scsiState = scsiCommandCertify();
       break;
 
       case SCSI_VERIFY:
@@ -560,6 +565,9 @@ uint8_t scsiEmulationCommand(void)
       switch (opCode) {
          case 0x05:
          return SCSI_READCAPACITY;
+         break;
+         case 0x0E:
+         return SCSI_CERTIFY;
          break;
          case 0x0F:
          return SCSI_VERIFY;
@@ -1607,6 +1615,19 @@ static uint8_t scsiCommandStartStop(void)
    commandDataBlock.status = 0x00; // 0x00 = Good
 
    // Transition to the successful state
+   return SCSI_STATUS;
+}
+
+
+// SCSI Command (0x2E) Write and Verify
+//
+// Adaptec ACB-4000 Manual notes:
+static uint8_t scsiCommandCertify(void)
+{
+
+	// Indicate successful command in status and message
+	commandDataBlock.status = 0x00; // 0x00 = Good
+
    return SCSI_STATUS;
 }
 
