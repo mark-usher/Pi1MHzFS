@@ -1739,41 +1739,32 @@ static uint8_t scsiCommandInquiry(void)
       debugString_C(PSTR("SCSI Commands: CommandInquiry (0x12) received\r\n"), DEBUG_SCSI_COMMAND);
 //      debugStringInt16_P(PSTR("SCSI Commands: Target LUN = "), commandDataBlock.targetLUN, true);
 //      debugStringInt16_P(PSTR("SCSI Commands: Length = "),commandDataBlock.data[4], true);
-		char msg[60];
-		sprintf(msg, "Commands: Target LUN = %d\r\n", commandDataBlock.targetLUN);
-		debugString_C(PSTR(msg), DEBUG_WARNING);
+		char msg[100];
+		sprintf(msg, "SCSI Commands: Target LUN = %d  Length = %d\r\n", commandDataBlock.targetLUN, commandDataBlock.data[4]);
+		debugString_C(PSTR(msg), DEBUG_INFO);
    }
 
-   if (commandDataBlock.data[4] < 36) {
-      if (debugFlag_scsiCommands)
-         debugString_P(PSTR("SCSI Commands: scsiCommandInquiry: Allocation length too short. Min. 36 bytes\r\n"));
+	// create a temporary buffer the size of the data to be returned
+	uint8_t buf[commandDataBlock.data[4]];
 
-      // Indicate unsuccessful command in status and message
-      commandDataBlock.status = (commandDataBlock.targetLUN << 5) | 0x02;      // 0x02 = Bad
-      }
-      else {
-      // create a temporary buffer the size of the data to be returned
-      uint8_t buf[commandDataBlock.data[4]];
+	// get the inquiry data either from the extended attributes or default data
+	if ( getInquiryData(commandDataBlock.data[4], buf, commandDataBlock.targetLUN) == 0) {
+		// Set up the control signals ready for the data in phase
+		scsiInformationTransferPhase(ITPHASE_DATAIN);
 
-			// get the inquiry data either from the extended attributes or default data
-			if ( getInquiryData(commandDataBlock.data[4], buf, commandDataBlock.targetLUN) == 0) {
-				// Set up the control signals ready for the data in phase
-				scsiInformationTransferPhase(ITPHASE_DATAIN);
+		// send back the inquiry data
+		for (uint8_t i = 0; i < commandDataBlock.data[4]; i++)
+			hostadapterWriteByte(buf[i]);
 
-				// send back the inquiry data
-				for (uint8_t i = 0; i < commandDataBlock.data[4]; i++)
-					hostadapterWriteByte(buf[i]);
+		// Indicate successful command in status and message
+		commandDataBlock.status = 0x00; // 0x00 = Good
+	}
+	else {
+		if (debugFlag_scsiCommands) debugString_C(PSTR("SCSI Commands: scsiCommandInquiry: Error reading Inquiry data\r\n"), DEBUG_ERROR);
 
-				// Indicate successful command in status and message
-				commandDataBlock.status = 0x00; // 0x00 = Good
-			}
-			else {
-				if (debugFlag_scsiCommands) debugString_C(PSTR("SCSI Commands: scsiCommandInquiry: Error reading Inquiry data\r\n"), DEBUG_ERROR);
-
-				// Indicate unsuccessful command in status and message
-				commandDataBlock.status = (commandDataBlock.targetLUN << 5) | 0x02;      // 0x02 = Bad
-			}
-   }
+		// Indicate unsuccessful command in status and message
+		commandDataBlock.status = (commandDataBlock.targetLUN << 5) | 0x02;      // 0x02 = Bad
+	}
 
    return SCSI_STATUS;
 }
