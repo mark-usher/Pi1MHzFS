@@ -2286,14 +2286,14 @@ static uint8_t scsiBeebScsiFatRead(void)
 // This is a RODIME vendor specific command.
 //
 // No infornmation what this does on the RODIME drives. A 6 byte cmd block is 
-// passed,  &E2, LUN , 0 , Timeout Value , 0 , 0
+// passed,  &E2, LUN , 0 , cycles , 0 , 0
 static uint8_t scsiCommandCertify(void)
 {
 
    if (debugFlag_scsiCommands) {
       debugString_P(PSTR("SCSI Commands: RODIME Certify command (G7 0xE2) received\r\n"));
       debugStringInt16_P(PSTR("SCSI Commands: Target LUN = "), commandDataBlock.targetLUN, true);
-      debugStringInt16_P(PSTR("SCSI Commands: Timeout = "), commandDataBlock.data[3], true);
+      debugStringInt16_P(PSTR("SCSI Commands: Number of cycles = "), commandDataBlock.data[3], true);
    }
 
    // Indicate successful command in status and message
@@ -2301,9 +2301,6 @@ static uint8_t scsiCommandCertify(void)
 
    return SCSI_STATUS;
 }
-
-
-
 
 
 // The BBC and Master ADFS appear to use:
