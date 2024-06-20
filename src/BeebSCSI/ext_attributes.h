@@ -7,7 +7,9 @@ uint16_t read_attribute(const char *token, char *buf);
 
 uint8_t getInquiryData(uint8_t bytesRequested, uint8_t *buf, uint8_t LUN);
 uint8_t readModePage(uint8_t LUN, uint8_t Page, uint8_t PageLength, uint8_t *returnBuffer);
-uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uint8_t *returnBuffer) ;
+uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uint8_t *returnBuffer);
+uint8_t writeModePage(uint8_t LUN, uint8_t *Data);
+uint8_t setModePage(uint8_t LUN, uint8_t *Data);
 
 bool StartsWith(const char *a, const char *b);
 void ToHexString(char *hex, char *string);
