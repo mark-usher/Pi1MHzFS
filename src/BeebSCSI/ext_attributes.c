@@ -48,32 +48,12 @@ static uint8_t ModeParameterHeader6 [] =
 	0x08												// the following LBA Block Descriptor Length
 };
 
-/*static uint8_t ModeParameterHeader10 [] =
-{
-// Mode Parameter Header (10)
-	0x00, 0x00,										// Mode Data length (MSB,LSB) of(MPHeader + LBA BLOCK + Mode Page)-1 : not including this byte
-	0x00,												// Medium type (0x00 = fixed hard drive)
-	0x00,												// b7 Write Protect bit | b6 Rsvd | b5 DPOFUA | b4-b0	Reserved
-	0x00,												// b7-b1 Reserved | b0 LongLBA
-	0x00, 0x0F										// the following LBA Block Descriptor Length (MSB,LSB)
-};
-*/
-
 // Short LBA mode parameter block descriptor - 8 bytes
 static uint8_t LBA_byte_block_descriptor_Mode6 [] =
 {
 	0x00, 0x00, 0x00, 0x00,						// Number of blocks MSB - LSB
 	0x00,												// reserved
 	0x00, 0x01, 0x00								// Logical block length (sector size)
-};
-
-// Long LBA mode parameter block descriptor - 16 bytes
-static uint8_t LBA_byte_block_descriptor_Mode10 [] =
-{
-	0x00, 0x00, 0x00, 0x00,						// Number of blocks 8 bytes (MSB - LSB)
-	0x00, 0x00, 0x00, 0x00,						// "         "   continued
-	0x00, 0x00, 0x00, 0x00,						// reserved
-	0x00, 0x00, 0x01, 0x00						// Logical block length (MSB - LSB)
 };
 
 // Mode Parameter Pages
@@ -167,16 +147,11 @@ static uint8_t UserPage2[] =
 };
 
 
-/*
- * Function: read_attribute
- * Arguments:
- * token	- param name to be looked up
- * buf		- buffer for string value.
- *
- * returns length of data in buffer
- * otherwise 0
- */
 
+// Looks up the value of token in the extended attibutes file
+// for the current LUN and returns the value in buffer
+// converting it from a hex string to hex values
+//
 uint16_t read_attribute(const char *token, char *buf) {
 
 	FIL fileObject;
@@ -325,9 +300,7 @@ uint16_t read_attribute(const char *token, char *buf) {
 	return 0;
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Gets the Inquiry Data from the file or uses default data
-//
 // length is the number of expected bytes and the size of the buffer
 //
 // Returns 0 if successful and the Inquiry data in the buffer
@@ -390,13 +363,21 @@ uint8_t getInquiryData(uint8_t bytesRequested, uint8_t *buf, uint8_t LUN) {
 //
 // Returns the length of the mode page data
 // otherwise 0 if unsuccessful
-
+//
 uint8_t readModePage(uint8_t LUN, uint8_t Page, uint8_t PageLength, uint8_t *returnBuffer) {
 
 	uint8_t status = 0;
 
-	// Which page has been requested? contained in b5-b0
+	// b7 and b6 contains the PC (page control field which affect which mode page parameters
+	// are returned
+	// 00 = Current values
+	// 01 = Changeable values
+	// 10 = Default values
+	// 11 = Saved values
 
+	// This is ignored and the current values are always returned
+
+	// Which page has been requested? contained in b5-b0
 	switch (Page & 0x3F) {
 
 		case 1:		// Error Correction Status Parameters Page
@@ -460,7 +441,7 @@ uint8_t readModePage(uint8_t LUN, uint8_t Page, uint8_t PageLength, uint8_t *ret
 // either from the extended attributes file or from default values
 // returns 0 as unsuccessful
 // otherwise returns the total amount of data
-
+//
 uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t PageLength, uint8_t *returnBuffer)
 {
 
@@ -545,18 +526,13 @@ uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t Pa
 			debugString_C(PSTR("ext_attributes: getModePage: Using default values for the LBA descriptor.\r\n"), DEBUG_INFO);
 		}
 
-		switch (LBA_size)
+		if (LBA_size == 8)
 		{
-		case 8:
 			memcpy(returnBuffer+ptr, LBA_byte_block_descriptor_Mode6, LBA_size);
-			break;
-		case 16:
-			memcpy(returnBuffer+ptr, LBA_byte_block_descriptor_Mode10, LBA_size);
-			break;
-		default: 
+		}
+		else {
 			if (debugFlag_extended_attributes) debugStringInt16_P(PSTR("ext_attributes: getModePage: Invalid LBA length : "), (uint16_t)LBA_size, true);
 			return 0;
-			break;
 		}
 	}
 
@@ -643,6 +619,128 @@ uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t Pa
 //	if (debugFlag_extended_attributes) debugStringInt16_P(PSTR("ext_attributes: getModePage: total packet length in buffer: "), (uint16_t)returnBuffer[0], true);
 
 	return ptr;
+}
+
+// Write a mode page
+//
+// Returns 0 if successful
+// otherwise 1
+// 
+uint8_t writeModePage(uint8_t LUN, uint8_t *Data) {
+
+	uint8_t status = 0;
+	uint8_t Page = Data[0];
+	uint8_t PageLength = Data[1];
+
+	if (debugFlag_extended_attributes) {
+		if (LUN & 1) {
+			debugStringInt16_P(PSTR("ext_attributes: writeModePage: Flag bit SP :"), (uint16_t)(LUN & 1), true);
+		}
+	}
+
+	// Which page has been requested? contained in b5-b0
+	switch (Page & 0x3F) {
+
+		case 1:		// Error Correction Status Parameters Page
+			if (PageLength==0)
+				status=setModePage(LUN, ErrorCorrectionStatus);
+			else
+				status=setModePage(LUN, Data);
+			break;
+
+		case 3:		// Format Device Parameters Page
+			if (PageLength==0)
+				status=setModePage(LUN, FormatDevice);
+			else
+				status=setModePage(LUN, Data);
+			break;
+
+		case 4:		// Rigid Disk Drive Geometry Parameters Page
+			if (PageLength==0) {
+				// set the default cylinders and heads to the value in the .dsc if available
+				filesystemGetCylHeadsFromDsc(LUN, RigidDiskDriveGeometry);
+				status=setModePage(LUN, RigidDiskDriveGeometry);
+			}
+			else
+				status=setModePage(LUN, Data);
+			break;
+
+		case 32:	// Serial Number Parameters Page
+			if (PageLength==0)
+				status=setModePage(LUN, SerialNumber);
+			else
+				status=setModePage(LUN, Data);
+			break;
+
+		case 33:	// Manufacturer Parameters Page
+			if (PageLength==0)
+				status=setModePage(LUN, Manufacturer);
+			else
+				status=setModePage(LUN, Data);
+			break;
+
+		case 35:	// System Flags Parameters Page
+			if (PageLength==0)
+				status=setModePage(LUN, SystemFlags);
+			else
+				status=setModePage(LUN, Data);
+			break;
+
+		case 36:	// Undocumented Parameters Page
+			if (PageLength==0)
+				status=setModePage(LUN, Page0x24);
+			else
+				status=setModePage(LUN, Data);
+			break;
+
+		case 37:	// User Page 1
+			if (PageLength==0)
+				status=setModePage(LUN, UserPage1);
+			else
+				status=setModePage(LUN, Data);
+			break;
+
+		case 38:	// User Page 2
+			if (PageLength==0)
+				status=setModePage(LUN, UserPage2);
+			else
+				status=setModePage(LUN, Data);
+			break;
+		default:
+			if (debugFlag_scsiCommands) debugString_C(PSTR("ext_attributes: writeModePage: Page not implemented Error\r\n"), DEBUG_ERROR);
+			status = 1;
+			break;
+	}
+
+	return status;
+
+}
+
+uint8_t setModePage(uint8_t LUN, uint8_t *Data) {
+
+	uint8_t byteCounter;
+	uint8_t Page=Data[0];
+	uint8_t DataLength=Data[1];
+
+	if (debugFlag_extended_attributes) {
+		debugString_C(PSTR("MODE SELECT Parameters : setModePage: Page="), DEBUG_INFO);
+		debugStringInt16_P(PSTR(" "), Page, false);
+		debugStringInt16_P(PSTR(" Data Length="), DataLength, false);
+	}
+
+	// for now, output to debug
+	if (debugFlag_extended_attributes) 
+		debugString_C(PSTR(" Data: "), DEBUG_INFO);
+
+      // Get the incoming bytes;
+		for (byteCounter = 2; byteCounter < (DataLength+2); byteCounter++) {
+			// Show received byte value
+			if (debugFlag_extended_attributes)debugStringInt16_P(PSTR(" "), Data[byteCounter], false);
+		}
+		if (debugFlag_extended_attributes)debugString_P(PSTR("\r\n"));
+
+
+	return 0;
 }
 
 
