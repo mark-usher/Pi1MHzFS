@@ -53,7 +53,9 @@ static uint8_t LBA_byte_block_descriptor_Mode6 [] =
 {
 	0x00, 0x00, 0x00, 0x00,						// Number of blocks MSB - LSB
 	0x00,												// reserved
-	0x00, 0x01, 0x00								// Logical block length (sector size)
+	(DEFAULT_BLOCK_SIZE & 0xFF0000) >> 16,			// Logical block length (sector size)
+	(DEFAULT_BLOCK_SIZE & 0x00FF00) >> 8,
+	(DEFAULT_BLOCK_SIZE & 0x0000FF)
 };
 
 // Mode Parameter Pages
@@ -61,28 +63,29 @@ static uint8_t LBA_byte_block_descriptor_Mode6 [] =
 // Mode Page 1 - Error Correction Status Parameters
 static uint8_t ErrorCorrectionStatus[] =
 {
-	0x01,						// Page Code	| b7 PS| b6 SPF| b5-b0 Page Code		1	 buffer%?4+blength
-	0x03,						// Following data Length									3
-	0x20,						// | 7 | 6 | TB | 4 | 3 | PER | DTE | DCR |			20
-	0x04,						// Error recovery Retries (4)								4
-	0x05,						// Error Correction Bit Span (5)							5	to + ?buffer% = pagelen
+	0x01,						// Page Code	| b7 PS| b6 SPF| b5-b0 Page Code
+	0x03,						// Following data Length
+	0x20,						// | 7 | 6 | TB | 4 | 3 | PER | DTE | DCR |
+	0x04,						// Error recovery Retries (4)
+	0x05,						// Error Correction Bit Span (5)
 };
 
 // Mode Page 3 - Format Device Parameters
 static uint8_t FormatDevice[] =
 {
-	0x03,						// Page Code	| b7 PS| b6 SPF| b5-b0 Page Code		buffer%?4+blength
-	0x13,						// Page Length (19)											buffer%?5	(19)
+	0x03,						// Page Code	| b7 PS| b6 SPF| b5-b0 Page Code
+	0x13,						// Page Length (19)
 	0x01, 0x32,				// Tracks per Zone (MSB, LSB)
 	0x01, 0x32,				// Alternate Sectors per Zone (MSB, LSB)
 	0x00, 0x06,				// Alternate Tracks per Zone (MSB, LSB)
 	0x00, 0x06,				// Alternate Tracks per Volume (MSB, LSB)
-	DEFAULT_SECTORS_PER_TRACK & 0xFF00,		// Sectors per Track (MSB, LSB)
-	DEFAULT_SECTORS_PER_TRACK & 0xFF,		
-	0x01, 0x00,				// Data Bytes per Physical Sector (MSB, LSB)
+	(DEFAULT_SECTORS_PER_TRACK & 0xFF00) >> 8,		// Sectors per Track (MSB, LSB)
+	(DEFAULT_SECTORS_PER_TRACK & 0xFF),		
+	(DEFAULT_BLOCK_SIZE & 0x00FF00) >> 8, 				// Data Bytes per Physical Sector (MSB, LSB)
+	(DEFAULT_BLOCK_SIZE & 0x0000FF),
 	0x00, 0x01,				// Interleave (MSB, LSB)
 	0x00, 0x00,				// Track Skew Factor (MSB, LSB)
-	0x00, 0x00,				// Cylinder Skew Factor (MSB, LSB)						0	0
+	0x00, 0x00,				// Cylinder Skew Factor (MSB, LSB)
 	0x80,						// | b7 SSEC | b6 HSEC | b5 RMB | b4 SURF | b3-b0 Drive Type
 };	
 
@@ -486,7 +489,6 @@ uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t Pa
 		length = 4;
 		memcpy(returnBuffer, ModeParameterHeader6, length);
 	}
-
 
 	// get the size of the LBA Header
 	if (length == 4) {
