@@ -70,6 +70,18 @@
 
 uint16_t sectorsperTrack = DEFAULT_SECTORS_PER_TRACK;
 
+// Minimum geometry details needed to operate the LUN
+// This saves looking them up again in the future
+struct HDGeometry
+{
+	uint32_t BlockSize;				// This will almost always be 256
+	uint32_t Cylinders;
+	uint8_t  Heads;
+	uint16_t SectorsPerTrack;		// default is 33
+	uint16_t Interleave;				// doesn't really matter for BeebSCSI
+};
+
+
 // File system state structure
 NOINIT_SECTION static struct filesystemStateStruct
 {
@@ -83,6 +95,7 @@ NOINIT_SECTION static struct filesystemStateStruct
    bool fsLunStatus[MAX_LUNS];         // LUN image availability flags for the currently selected LUN directory (true = started, false = stopped)
    uint8_t fsLunUserCode[MAX_LUNS][5]; // LUN 5-byte User code (used for F-Code interactions - only present for laser disc images)
 	bool fsLunHasExtendedAttributes[MAX_LUNS];	// flag to show if extended attributes are available
+	struct HDGeometry fsLunGeometry[MAX_LUNS];   // Keep the geometry details for each LUN
 } filesystemState;
 
 NOINIT_SECTION static char fileName[255];       // String for storing LFN filename
@@ -433,6 +446,9 @@ bool filesystemCheckLunDirectory(uint8_t lunDirectory)
 
 // Function to scan for SCSI LUN image file on the mounted file system
 // and check the image is valid.
+// Checks for a LUN .dsc file, if not found, creates one
+// Checks for a LUN user code descriptor file (.ucd) 
+// Checks for the presence of extended attributes
 bool filesystemCheckLunImage(uint8_t lunNumber)
 {
    uint32_t lunFileSize;
@@ -610,6 +626,9 @@ uint32_t filesystemGetLunSizeFromDsc( uint8_t lunNumber)
    FRESULT fsResult;
    FIL fileObject;
 
+	// pointer to the geometry data of the currently selected LUN
+	struct HDGeometry* ptr = &filesystemState.fsLunGeometry[lunNumber];
+
    // Assemble the DSC file name
    sprintf(fileName, "/BeebSCSI%d/scsi%d.dsc", filesystemState.lunDirectory, lunNumber);
 
@@ -630,12 +649,10 @@ uint32_t filesystemGetLunSizeFromDsc( uint8_t lunNumber)
       // Interpret the DSC information and calculate the LUN size
       if (debugFlag_filesystem) debugLunDescriptor(Buffer);
 
-      uint32_t blockSize = (((uint32_t)Buffer[9] << 16) + ((uint32_t)Buffer[10] << 8) + (uint32_t)Buffer[11]);
-      uint32_t cylinderCount = (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14]);
-      uint32_t dataHeadCount =  (uint32_t)Buffer[15];
-
-		// DSC doesn't have sectors per track, so always ensure it is reset to the default
-		sectorsperTrack = DEFAULT_SECTORS_PER_TRACK;
+		(*ptr).BlockSize = (((uint32_t)Buffer[9] << 16) + ((uint32_t)Buffer[10] << 8) + (uint32_t)Buffer[11]);
+		(*ptr).Cylinders = (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14]);
+		(*ptr).Heads = (uint8_t)Buffer[15];
+		(*ptr).SectorsPerTrack = DEFAULT_SECTORS_PER_TRACK;			// .dsc files don't contain sectors per track, always assume default
 
       // Note:
       //
@@ -646,14 +663,49 @@ uint32_t filesystemGetLunSizeFromDsc( uint8_t lunNumber)
       // (the default '33' is because SuperForm uses a 2:1 interleave format with 33 sectors per
       // track (F-2 in the ACB-4000 manual))
       // bytes = sectors * block size (block size is always 256 bytes)
-      lunSize = ((dataHeadCount * cylinderCount) * sectorsperTrack) * blockSize;
+      lunSize = filesystemGetLunTotalBytes(lunNumber);
+
       f_close(&fileObject);
    }
 
    return lunSize;
 }
 
+// Function to return the LUN image Block size in bytes from the stored geometry
+//
+uint32_t filesystemGetLunBlockSize( uint8_t lunNumber)
+{
+	return filesystemState.fsLunGeometry[lunNumber].BlockSize;
+}
+
+
+// Function to return the LUN image size in bytes from the stored geometry
+//
+uint32_t filesystemGetLunTotalBytes( uint8_t lunNumber)
+{
+	// pointer to the geometry data of the LUN
+	struct HDGeometry* ptr = &filesystemState.fsLunGeometry[lunNumber];
+
+	// Tracks = Cylinders * Heads
+	// Total Sectors = Tracks * Sectors per Track 
+	// Total Bytes = Total Sectors * Block Size
+	return (((*ptr).Heads * (*ptr).Cylinders) * (*ptr).SectorsPerTrack) * (*ptr).BlockSize;
+}
+
+// Function to return the LUN image size in sectors from the stored geometry
+//
+uint32_t filesystemGetLunTotalSectors( uint8_t lunNumber)
+{
+	// pointer to the geometry data of the LUN
+	struct HDGeometry* ptr = &filesystemState.fsLunGeometry[lunNumber];
+
+	// Tracks = Cylinders * Heads
+	// Total Sectors = Tracks * Sectors per Track 
+	return (((*ptr).Cylinders * (*ptr).Heads) * (*ptr).SectorsPerTrack);
+}
+
 // Function to return the cylinders and heads from the LUN descriptor file parameters
+//
 uint8_t filesystemGetCylHeadsFromDsc( uint8_t lunNumber, uint8_t *returnbuf)
 {
    uint8_t rc = 0;
@@ -690,11 +742,13 @@ uint8_t filesystemGetCylHeadsFromDsc( uint8_t lunNumber, uint8_t *returnbuf)
    return rc;
 
 }
+
 // Function to automatically create a DSC file based on the file size of the LUN image
 // Note, this function is specific to the BBC Micro and the ACB-4000 host adapter card
 // If the DSC is inaccurate then, for the BBC Micro, it's not that important, since the
 // host only looks at its own file system data (Superform and other formatters use the DSC
 // information though... so beware).
+//
 bool filesystemCreateDscFromLunImage(uint8_t lunDirectory, uint8_t lunNumber, uint32_t lunFileSize)
 {
    uint32_t cylinders;

@@ -340,7 +340,7 @@ uint8_t getInquiryData(uint8_t bytesRequested, uint8_t *buf, uint8_t LUN) {
 	
 	// get the LUN size from the DSC to add to the default model
 	// 0 is returned if the DSC cannot be read
-	uint16_t LUN_size =	(uint16_t)((filesystemGetLunSizeFromDsc(LUN)) >> 20);	// size in MB
+	uint16_t LUN_size =	(uint16_t)((filesystemGetLunTotalBytes(LUN)) >> 20);	// size in MB
 
 	int len;
 

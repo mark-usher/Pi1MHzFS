@@ -1724,7 +1724,7 @@ static uint8_t scsiCommandReadCapacity(void)
       return SCSI_STATUS;
    }
 
-   uint32_t lunsize = filesystemGetLunSizeFromDsc(commandDataBlock.targetLUN)/256;
+   uint32_t lunsize = filesystemGetLunTotalSectors(commandDataBlock.targetLUN);
 
    // Set up the control signals ready for the data in phase
    scsiInformationTransferPhase(ITPHASE_DATAIN);
@@ -1735,8 +1735,9 @@ static uint8_t scsiCommandReadCapacity(void)
    hostadapterWriteByte((uint8_t)((lunsize & 0x00FF0000) >> 16));    // Last block
    hostadapterWriteByte((uint8_t)((lunsize & 0x0000FF00) >>  8));    // Last block
    hostadapterWriteByte((uint8_t)(lunsize & 0x000000FF));            // Last block LSB
-   // four bytes block size
-   uint32_t blocksize = 256;
+   
+	// four bytes block size
+   uint32_t blocksize = filesystemGetLunBlockSize(commandDataBlock.targetLUN);
    hostadapterWriteByte((uint8_t)((blocksize & 0xFF000000) >> 24));  // Bytes from index MSB
    hostadapterWriteByte((uint8_t)((blocksize & 0x00FF0000) >> 16));  // Bytes from index
    hostadapterWriteByte((uint8_t)((blocksize & 0x0000FF00) >>  8));  // Bytes from index

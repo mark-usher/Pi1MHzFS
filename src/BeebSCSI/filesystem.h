@@ -64,6 +64,11 @@ bool filesystemCheckExtAttributes( uint8_t lunNumber);
 bool filesystemHasExtAttributes( uint8_t lunNumber);
 
 uint32_t filesystemGetLunSizeFromDsc(uint8_t lunNumber);
+
+uint32_t filesystemGetLunBlockSize( uint8_t lunNumber);
+uint32_t filesystemGetLunTotalSectors(uint8_t lunNumber);
+uint32_t filesystemGetLunTotalBytes(uint8_t lunNumber);
+
 uint8_t filesystemGetCylHeadsFromDsc( uint8_t lunNumber, uint8_t *returnbuf);
 bool filesystemCreateDscFromLunImage(uint8_t lunDirectory, uint8_t lunNumber, uint32_t lunFileSize);
 
