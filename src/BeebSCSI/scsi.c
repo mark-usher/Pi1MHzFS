@@ -1629,7 +1629,6 @@ static uint8_t scsiCommandVerify(void)
 {
    uint32_t logicalBlockAddress = 0;
    uint32_t lunSizeInSectors = 0;
-   uint8_t Buffer[22];
 
    if (debugFlag_scsiCommands) {
       debugString_P(PSTR("SCSI Commands: VERIFY command (0x2F) received\r\n"));
@@ -1665,25 +1664,9 @@ static uint8_t scsiCommandVerify(void)
         ((uint32_t)commandDataBlock.data[7] << 8) | ((uint32_t)commandDataBlock.data[8])
       , true);
    }
-   // Read the drive descriptor
-   if (filesystemReadLunDescriptor(commandDataBlock.targetLUN, Buffer)) {
-      // Get the LUN size (as number of available sectors)
-      // The drive size (actual data storage) is calculated by the following formula:
-      //
-      // tracks = heads * cylinders
-      // sectors = tracks * sectors per track
-      lunSizeInSectors = ((uint32_t)Buffer[15] * (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14])) * sectorsperTrack;
-   } else {
-      // DSC not OK
-      if (debugFlag_scsiCommands) debugString_P(PSTR("SCSI Commands: DSC read error\r\n"));
-      // Indicate unsuccessful command in status and message
-      commandDataBlock.status = (uint8_t)(commandDataBlock.targetLUN << 5) | 0x02; // 0x02 = Bad
 
-      // Set request sense error globals
-      requestSenseData[commandDataBlock.targetLUN] = DRIVE_NOT_READY; // Drive not ready
-
-      return SCSI_STATUS;
-   }
+	// Read the cached parameters
+	lunSizeInSectors = filesystemGetLunTotalSectors(commandDataBlock.targetLUN);
 
    // Check that the LBA is within range of the LUN size
    if (logicalBlockAddress >= lunSizeInSectors) {
@@ -1694,7 +1677,6 @@ static uint8_t scsiCommandVerify(void)
       commandDataBlock.status = (uint8_t)(commandDataBlock.targetLUN << 5) | 0x02; // 0x02 = Bad
 
       // Set request sense error globals
-
       requestSenseData[commandDataBlock.targetLUN] = ILLEGAL_ADDR | (logicalBlockAddress & 0x00FFFFFF); // Illegal block address
 
       return SCSI_STATUS;
