@@ -68,8 +68,6 @@
 
 #define MAX_LUNS 8
 
-uint16_t sectorsperTrack = DEFAULT_SECTORS_PER_TRACK;
-
 // Minimum geometry details needed to operate the LUN
 // This saves looking them up again in the future
 struct HDGeometry
@@ -80,7 +78,6 @@ struct HDGeometry
 	uint16_t SectorsPerTrack;		// default is 33
 	uint16_t Interleave;				// doesn't really matter for BeebSCSI
 };
-
 
 // File system state structure
 NOINIT_SECTION static struct filesystemStateStruct
@@ -716,6 +713,12 @@ uint32_t filesystemGetLunBlockSize( uint8_t lunNumber)
 	return filesystemState.fsLunGeometry[lunNumber].BlockSize;
 }
 
+// Function to return the LUN image sectors per track size in bytes from the stored geometry
+//
+uint32_t filesystemGetLunSPTSize( uint8_t lunNumber)
+{
+	return filesystemState.fsLunGeometry[lunNumber].SectorsPerTrack;
+}
 
 // Function to return the LUN image size in bytes from the stored geometry
 //
@@ -775,17 +778,17 @@ bool filesystemCreateDscFromLunImage(uint8_t lunDirectory, uint8_t lunNumber, ui
    // Calculate the LUN file size in tracks (n sectors per track, 256 bytes per sector)
 
    // Check that the LUN file size is actually a size which ADFS can support (the number of sectors is limited to a 21 bit number)
-   // i.e. a maximum of 0x1FFFFF or 2,097,151 (* 256 bytes per sector = 512Mb = 536,870,656 bytes)
-   if (lunFileSize > ((1<<21)*256) ) {
+   // i.e. a maximum of 0x1FFFFF or 2,097,151 (* 256 - DEFAULT_BLOCK_SIZE - bytes per sector = 512Mb = 536,870,656 bytes)
+   if (lunFileSize > ((1<<21)*DEFAULT_BLOCK_SIZE) ) {
       if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCreateDscFromLunImage(): WARNING: The LUN file size is greater than 512MBytes\r\n"));
    }
 
    // Check that the LUN file size is actually a size which the ACB-4000 card could have supported (given that the
    // block and track sizes were fixed to 256 and a default of 33 respectively)
-   if (lunFileSize % (256 * sectorsperTrack) != 0) {
+   if (lunFileSize % (DEFAULT_BLOCK_SIZE * DEFAULT_SECTORS_PER_TRACK) != 0) {
       if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCreateDscFromLunImage(): WARNING: The LUN file size could not be supported by an ACB-4000 card. Not divisible by 256.\r\n"));
    }
-   lunFileSize = lunFileSize / (sectorsperTrack * 256);
+   lunFileSize = lunFileSize / (DEFAULT_BLOCK_SIZE * DEFAULT_SECTORS_PER_TRACK);
 
    // The lunFileSize (in tracks) should be evenly divisible by the head count and the head count should be
    // 16 or less.
@@ -794,10 +797,12 @@ bool filesystemCreateDscFromLunImage(uint8_t lunDirectory, uint8_t lunNumber, ui
    cylinders = lunFileSize / heads;
 
    if (debugFlag_filesystem) {
-      debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): LUN size in tracks (sectorsperTrack * 256 bytes) = "), lunFileSize, true);
       debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): Number of heads = "), heads, true);
       debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): Number of cylinders = "), cylinders, true);
-      debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): Number of sectors per track = "), sectorsperTrack, true);
+      debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): Number of sectors per track = "), DEFAULT_SECTORS_PER_TRACK, true);
+      debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): LUN size in tracks = "), heads*cylinders, true);
+      debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): LUN size in sectors = "), heads*cylinders*DEFAULT_SECTORS_PER_TRACK, true);
+      debugStringInt32_P(PSTR("File system: filesystemCreateDscFromLunImage(): LUN size in bytes (total sectors * 256 bytes) = "), heads*cylinders*DEFAULT_SECTORS_PER_TRACK*DEFAULT_BLOCK_SIZE, true);
    }
    // The first 4 bytes are the Mode Select Parameter List (ACB-4000 manual figure 5-18)
    Buffer[ 0] = 0;      // Reserved (0)

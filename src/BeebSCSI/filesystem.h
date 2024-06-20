@@ -41,8 +41,6 @@
 #define DEFAULT_SECTORS_PER_TRACK 33	
 #define DEFAULT_BLOCK_SIZE 256
 
-extern uint16_t sectorsperTrack;
-
 // External prototypes
 void filesystemInitialise(uint8_t scsijuke);
 void filesystemReset(void);
@@ -68,6 +66,7 @@ uint32_t filesystemGetLunSizeFromDsc(uint8_t lunNumber);
 
 void filesystemGetCylHeads( uint8_t lunNumber, uint8_t *returnbuf);
 uint32_t filesystemGetLunBlockSize(uint8_t lunNumber);
+uint32_t filesystemGetLunSPTSize( uint8_t lunNumber);
 uint32_t filesystemGetLunTotalSectors(uint8_t lunNumber);
 uint32_t filesystemGetLunTotalBytes(uint8_t lunNumber);
 
