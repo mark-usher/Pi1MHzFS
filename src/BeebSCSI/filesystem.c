@@ -68,7 +68,7 @@
 
 #define MAX_LUNS 8
 
-uint8_t sectorsperTrack = DEFAULT_SECTORS_PER_TRACK;
+uint16_t sectorsperTrack = DEFAULT_SECTORS_PER_TRACK;
 
 // File system state structure
 NOINIT_SECTION static struct filesystemStateStruct
@@ -634,6 +634,9 @@ uint32_t filesystemGetLunSizeFromDsc( uint8_t lunNumber)
       uint32_t cylinderCount = (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14]);
       uint32_t dataHeadCount =  (uint32_t)Buffer[15];
 
+		// DSC doesn't have sectors per track, so always ensure it is reset to the default
+		sectorsperTrack = DEFAULT_SECTORS_PER_TRACK;
+
       // Note:
       //
       // The drive size (actual data storage) is calculated by the following formula:
@@ -975,7 +978,7 @@ bool filesystemFormatLun(uint8_t lunNumber, uint8_t dataPattern)
    uint32_t requiredNumberOfSectors = 0;
    FIL fileObject;
    FRESULT fsResult;
-   uint8_t Buffer[22];
+   uint8_t Buffer[24];
 
    if (debugFlag_filesystem) debugStringInt16_P(PSTR("File system: filesystemFormatLun(): Formatting LUN image "), lunNumber, true);
 
@@ -988,10 +991,33 @@ bool filesystemFormatLun(uint8_t lunNumber, uint8_t dataPattern)
       return false;
    }
 
+	// get values from .dsc
+
    // Calculate the number of 256 byte sectors required to fulfill the drive geometry
    // tracks = heads * cylinders
    // sectors = tracks * sectorsperTrack
    requiredNumberOfSectors = ((uint32_t)Buffer[15] * (((uint32_t)Buffer[13] << 8) + (uint32_t)Buffer[14])) * sectorsperTrack;
+
+	if (filesystemHasExtAttributes(lunNumber)) {
+		// get values from extended attributes
+		if (readModePage(lunNumber, 3, 24, Buffer) !=0) {
+			sectorsperTrack = (uint16_t)((Buffer[22] << 8) + Buffer[23]);
+			if (debugFlag_filesystem) debugStringInt32_P(PSTR("File system: filesystemFormatLun(): Sectors per Track = "), sectorsperTrack, true);
+		}
+		else
+		{
+			sectorsperTrack = DEFAULT_SECTORS_PER_TRACK;
+		}
+
+		if (readModePage(lunNumber, 4, 24, Buffer) !=0) {
+			// Calculate the number of 256 byte sectors required to fulfill the drive geometry
+			// tracks = heads * cylinders
+			// sectors = tracks * sectorsperTrack
+
+			requiredNumberOfSectors = (uint32_t)((uint8_t)(Buffer[17]) * ((uint16_t)((Buffer[15] << 8) + (uint8_t)Buffer[16])) * sectorsperTrack);
+		}
+	}
+
    if (debugFlag_filesystem) debugStringInt32_P(PSTR("File system: filesystemFormatLun(): Sectors required = "), requiredNumberOfSectors, true);
 
    // Assemble the .dat file name

@@ -40,7 +40,7 @@
 // allows for a higher density of sectors per track.
 #define DEFAULT_SECTORS_PER_TRACK 33	
 
-extern uint8_t sectorsperTrack;
+extern uint16_t sectorsperTrack;
 
 // External prototypes
 void filesystemInitialise(uint8_t scsijuke);
