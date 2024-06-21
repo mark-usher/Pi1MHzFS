@@ -115,6 +115,7 @@ static uint8_t scsiCommandTestUnitReady(void);
 static uint8_t scsiCommandRezeroUnit(void);
 static uint8_t scsiCommandRequestSense(void);
 static uint8_t scsiCommandFormat(void);
+static uint8_t scsiCommandReassignBlocks(void);
 static uint8_t scsiCommandRead6(void);
 static uint8_t scsiCommandWrite6(void);
 static uint8_t scsiCommandSeek(void);
@@ -251,6 +252,10 @@ void scsiProcessEmulation(void)
 
       case SCSI_FORMAT:
       scsiState = scsiCommandFormat();
+      break;
+
+      case SCSI_REASSIGNBLOCKS:
+      scsiState = scsiCommandReassignBlocks();
       break;
 
       case SCSI_READ6:
@@ -530,6 +535,10 @@ uint8_t scsiEmulationCommand(void)
 
          case 0x04:
          return SCSI_FORMAT;
+         break;
+
+         case 0x07:
+         return SCSI_REASSIGNBLOCKS;
          break;
 
          case 0x08:
@@ -928,6 +937,97 @@ static uint8_t scsiCommandFormat(void)
 
    // Tell the file system to start the new LUN
    filesystemSetLunStatus(commandDataBlock.targetLUN, true);   // Needed to prevent verify looping forever
+
+   // Indicate successful command in status and message
+   commandDataBlock.status = 0x00; // 0x00 = Good
+
+   return SCSI_STATUS;
+}
+
+// SCSI Command (0x07) Reassign Blocks
+//
+// Reads the blocks sent for reassignment, but does nothing with them
+//
+static uint8_t scsiCommandReassignBlocks(void)
+{
+
+   if (debugFlag_scsiCommands) {
+      debugString_P(PSTR("SCSI Commands: ReassignBlocks command (0x07) received\r\n"));
+      debugStringInt16_P(PSTR("SCSI Commands: Target LUN = "), commandDataBlock.targetLUN, true);
+   }
+
+	uint8_t longlba;
+	bool longlist = false;
+
+	longlist = ((commandDataBlock.data[1] & 1) == 1);
+
+	// If the LongLBA bit 1 is 0, LBA is 4 bytes, otherwise LBA is 8 bytes
+	if ((commandDataBlock.data[1] & 1) == 0)
+		longlba=4;
+	else
+		longlba=8;
+
+	uint8_t Buffer[longlba];
+
+	// Set up the control signals ready for the data out phase
+	scsiInformationTransferPhase(ITPHASE_DATAOUT);
+
+	if (debugFlag_scsiCommands)debugString_P(PSTR("Parameter List Header ="));
+	// Get the Parameter List Header;
+	for (uint8_t byteCounter = 0; byteCounter < 4; byteCounter++) {
+		Buffer[byteCounter] = hostadapterReadByte();
+		// Show received byte value
+		if (debugFlag_scsiCommands)debugStringInt16_P(PSTR(" "), Buffer[byteCounter], false);
+	}
+	if (debugFlag_scsiCommands)debugString_P(PSTR("\r\n"));
+
+	uint32_t list_length;
+	list_length = 
+	      ((uint32_t)Buffer[2] << 8) |
+   	   ((uint32_t)Buffer[3]);
+	
+	if (longlist) {
+		list_length = 
+	      ((uint32_t)Buffer[0] << 24) |
+	      ((uint32_t)Buffer[1] << 16) |
+			list_length;
+	}
+
+	uint32_t logicalBlockAddress = 0;
+	uint64_t logicalBlockAddress64 = 0;
+
+	if (debugFlag_scsiCommands)debugString_P(PSTR("Defective LBA List ="));
+
+	for (uint8_t byteCounter = 0; byteCounter < (list_length/longlba); byteCounter++) {
+		if (longlba==4) {
+			logicalBlockAddress =
+				((uint32_t)hostadapterReadByte() << 24) |
+				((uint32_t)hostadapterReadByte() << 16) |
+				((uint32_t)hostadapterReadByte() << 8) |
+				((uint32_t)hostadapterReadByte());
+
+			// Show received byte value
+			if (debugFlag_scsiCommands)debugStringInt32_P(PSTR(" "), logicalBlockAddress, false);
+		}
+		else
+		{
+			logicalBlockAddress64 =
+				((uint64_t)hostadapterReadByte() << 56) |
+				((uint64_t)hostadapterReadByte() << 48) |
+				((uint64_t)hostadapterReadByte() << 40) |
+				((uint64_t)hostadapterReadByte() << 32) |
+				((uint64_t)hostadapterReadByte() << 24) |
+				((uint64_t)hostadapterReadByte() << 16) |
+				((uint64_t)hostadapterReadByte() <<  8) |
+				((uint64_t)hostadapterReadByte());
+
+			// Show received byte value
+			if (debugFlag_scsiCommands)debugStringInt32_P(PSTR(" "), (uint32_t)(logicalBlockAddress64 >> 32), false);
+			if (debugFlag_scsiCommands)debugStringInt32_P(PSTR(""), (uint32_t)(logicalBlockAddress64 & 0x00000000FFFFFFFF), false);
+		}
+	}
+	if (debugFlag_scsiCommands)debugString_P(PSTR("\r\n"));
+
 
    // Indicate successful command in status and message
    commandDataBlock.status = 0x00; // 0x00 = Good
