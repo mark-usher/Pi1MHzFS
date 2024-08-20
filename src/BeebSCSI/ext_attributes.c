@@ -16,6 +16,8 @@
 #define MAX_PREFS_VALUE_LEN 482
 #define MAX_PREFS_LINE_LEN (MAX_PREFS_TOKEN_LEN + MAX_PREFS_VALUE_LEN)
 
+
+
 // Token written to start of ext attributes files
 #define PREFS_TOKEN "# Drive Extended attributes - keep this line"
 
@@ -382,6 +384,8 @@ uint8_t readModePage(uint8_t LUN, uint8_t Page, uint8_t PageLength, uint8_t *ret
 
 	Page = Page & 0x3F;
 
+	debugStringInt16_P(PSTR("ext_attributes: readModePage: Read Mode Page :"), (uint16_t)Page, true);
+
 	// Which page has been requested? contained in b5-b0
 	switch (Page) {
 
@@ -628,12 +632,76 @@ uint8_t getModePage(uint8_t LUN, uint8_t *DefaultValue, uint8_t Page, uint8_t Pa
 	return ptr;
 }
 
-// Write a mode page
+// replace Mode Page data in the ext-attributes file with another string
+uint8_t replaceModePage(uint8_t LUN, uint8_t *Data) {
+
+	uint8_t status = 0;
+	uint8_t retString[512];
+
+//	uint8_t Page=Data[0] & 0x3F;
+//	uint8_t DataLength=Data[1];
+	
+	status =	createModePage(LUN, Data, retString);
+	
+	return status;
+}
+
+// create a non-mode page either from default data or data passed
 //
 // Returns 0 if successful
 // otherwise 1
 // 
-uint8_t writeModePage(uint8_t LUN, uint8_t *Data) {
+uint8_t createNonModePage(bool usedefaults, uint8_t token, uint8_t *Data, uint8_t *retString) {
+
+	uint8_t status = 0;
+	char HexString[496];
+
+	switch (token) {
+		case TOKEN_INQUIRY:
+			if (usedefaults)
+				ToHexString(HexString, DefaultInquiryData, sizeof(DefaultInquiryData));
+			else
+				ToHexString(HexString, Data, sizeof(Data));
+
+			sprintf(retString, "Inquiry=%s\r\n", HexString);
+			break;
+
+		case TOKEN_MPHEADER:
+			if (usedefaults)
+				ToHexString(HexString, ModeParameterHeader6, sizeof(ModeParameterHeader6));
+			else
+				ToHexString(HexString, Data, sizeof(Data));
+
+			sprintf(retString, "ModeParamHeader=%s\r\n", HexString);
+			break;
+	
+		case TOKEN_LBADESCRIPTOR:
+			if (usedefaults)
+				ToHexString(HexString, LBA_byte_block_descriptor_Mode6, sizeof(LBA_byte_block_descriptor_Mode6));
+			else
+				ToHexString(HexString, Data, sizeof(Data));
+
+			sprintf(retString, "LBADescriptor=%s\r\n", HexString);
+			break;
+	
+		default:
+			if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: createNonModePage: Unrecognised Token\r\n"), DEBUG_ERROR);
+			status = 1;
+
+	}
+
+	if (debugFlag_extended_attributes) debugString_C(PSTR(retString), DEBUG_INFO);
+	
+	return status;
+}
+
+
+// create a mode page either from default data or data passed
+//
+// Returns 0 if successful
+// otherwise 1
+// 
+uint8_t createModePage(uint8_t LUN, uint8_t *Data, uint8_t *retString) {
 
 	uint8_t status = 0;
 	uint8_t Page = Data[0] & 0x3F;
@@ -641,111 +709,100 @@ uint8_t writeModePage(uint8_t LUN, uint8_t *Data) {
 
 	if (debugFlag_extended_attributes) {
 		if (LUN & 1) {
-			debugStringInt16_P(PSTR("ext_attributes: writeModePage: Flag bit SP :"), (uint16_t)(LUN & 1), true);
+			debugStringInt16_P(PSTR("ext_attributes: createModePage: Flag bit SP :"), (uint16_t)(LUN & 1), true);
 		}
 	}
 
 	// Which page has been requested? contained in b5-b0
 	switch (Page) {
 
+		case 0:
+			break;
 		case 1:		// Error Correction Status Parameters Page
 			if (PageLength==0)
-				status=setModePage(LUN, ErrorCorrectionStatus);
+				status=setModePage(ErrorCorrectionStatus, retString);
 			else
-				status=setModePage(LUN, Data);
+				status=setModePage(Data, retString);
 			break;
 
 		case 3:		// Format Device Parameters Page
 			if (PageLength==0)
-				status=setModePage(LUN, FormatDevice);
+				status=setModePage(FormatDevice, retString);
 			else
-				status=setModePage(LUN, Data);
+				status=setModePage(Data, retString);
 			break;
 
 		case 4:		// Rigid Disk Drive Geometry Parameters Page
 			if (PageLength==0) {
 				// set the default cylinders and heads to the value in the .dsc if available
 				filesystemGetCylHeads(LUN, RigidDiskDriveGeometry);
-				status=setModePage(LUN, RigidDiskDriveGeometry);
+				status=setModePage(RigidDiskDriveGeometry, retString);
 			}
 			else
-				status=setModePage(LUN, Data);
+				status=setModePage(Data, retString);
 			break;
 
 		case 32:	// Serial Number Parameters Page
 			if (PageLength==0)
-				status=setModePage(LUN, SerialNumber);
+				status=setModePage(SerialNumber, retString);
 			else
-				status=setModePage(LUN, Data);
+				status=setModePage(Data, retString);
 			break;
 
 		case 33:	// Manufacturer Parameters Page
 			if (PageLength==0)
-				status=setModePage(LUN, Manufacturer);
+				status=setModePage(Manufacturer, retString);
 			else
-				status=setModePage(LUN, Data);
+				status=setModePage(Data, retString);
 			break;
 
 		case 35:	// System Flags Parameters Page
 			if (PageLength==0)
-				status=setModePage(LUN, SystemFlags);
+				status=setModePage(SystemFlags, retString);
 			else
-				status=setModePage(LUN, Data);
+				status=setModePage(Data, retString);
 			break;
 
 		case 36:	// Undocumented Parameters Page
 			if (PageLength==0)
-				status=setModePage(LUN, Page0x24);
+				status=setModePage(Page0x24, retString);
 			else
-				status=setModePage(LUN, Data);
+				status=setModePage(Data, retString);
 			break;
 
 		case 37:	// User Page 1
 			if (PageLength==0)
-				status=setModePage(LUN, UserPage1);
+				status=setModePage(UserPage1, retString);
 			else
-				status=setModePage(LUN, Data);
+				status=setModePage(Data, retString);
 			break;
-
 		case 38:	// User Page 2
 			if (PageLength==0)
-				status=setModePage(LUN, UserPage2);
+				status=setModePage(UserPage2, retString);
 			else
-				status=setModePage(LUN, Data);
+				status=setModePage(Data, retString);
 			break;
 		default:
-			if (debugFlag_scsiCommands) debugString_C(PSTR("ext_attributes: writeModePage: Page not implemented Error\r\n"), DEBUG_ERROR);
+			if (debugFlag_extended_attributes) debugString_C(PSTR("ext_attributes: createModePage: Page not implemented Error\r\n"), DEBUG_ERROR);
 			status = 1;
 			break;
 	}
 
+	if (debugFlag_extended_attributes) debugString_C(PSTR(retString), DEBUG_INFO);
+		
 	return status;
 
 }
 
-uint8_t setModePage(uint8_t LUN, uint8_t *Data) {
+// Return a string (retString) for the requested page in the format
+// MODEPAGEx=data
+uint8_t setModePage(uint8_t *Data, uint8_t *retString) {
 
-	uint8_t byteCounter;
-	uint8_t Page=Data[0] & 0x3F;
-	uint8_t DataLength=Data[1];
+	// set up the name of the token to lookup
+	char HexString[496];
+	ToHexString(HexString, Data, (Data[1])+2);
 
-	if (debugFlag_extended_attributes) {
-		debugString_C(PSTR("MODE SELECT Parameters : setModePage: Page="), DEBUG_INFO);
-		debugStringInt16_P(PSTR(" "), Page, false);
-		debugStringInt16_P(PSTR(" Data Length="), DataLength, false);
-	}
-
-	// for now, output to debug
-	if (debugFlag_extended_attributes) 
-		debugString_C(PSTR(" Data: "), DEBUG_INFO);
-
-      // Get the incoming bytes;
-		for (byteCounter = 2; byteCounter < (DataLength+2); byteCounter++) {
-			// Show received byte value
-			if (debugFlag_extended_attributes)debugStringInt16_P(PSTR(" "), Data[byteCounter], false);
-		}
-		if (debugFlag_extended_attributes)debugString_P(PSTR("\r\n"));
-
+	sprintf(retString, "ModePage%d=%s\r\n", Data[0], HexString);
 
 	return 0;
 }
@@ -758,30 +815,20 @@ bool StartsWith(const char *a, const char *b)
 	return strncmp(a, b, strlen(b)) == 0;
 }
 
-// Converts a string into Hex
+// Converts hex number to ascii string of hex
 //
 // e.g. 210 -> 323130
-void ToHexString (char *hex, char *string) {
+void ToHexString (char *hex, char *string, size_t len) 
+{
 
-	// Convert text to hex.
-
-	size_t len = strlen(hex);
-//	if (debugFlag_extended_attributes) debugStringInt16_P(PSTR("ext_attributes: ToHexString: length: "), (uint16_t)len, true);
-
+	// Convert hex to ascii
 	for (size_t i = 0, j = 0; i < len; ++i, j += 2)
-		sprintf(hex + j, "%02x", string[i] & 0xff);
-
-	if (debugFlag_extended_attributes) {
-		char msg[256];
-		sprintf(msg, "ext_attributes: HexToString:%s in hex is '%s'.\r\n", hex, string);
-		debugString_C(PSTR(msg), DEBUG_INFO);
-	}
+		sprintf(hex + j, "%02X", string[i] & 0xff);
 
 	return;
-
 }
 
-// Converts hex numbers into a string
+// Converts hex string into values
 // hex is the string to convert
 // string is the destination
 // length is the number of hex digits to convert
