@@ -17,6 +17,7 @@
 
 // includes from the beebSCSI directory
 #include "BeebSCSI/debug.h"
+#include "BeebSCSI/fatfs/ff.h"  // needs type FIL in following filesystem.h include
 #include "BeebSCSI/filesystem.h"
 #include "BeebSCSI/hostadapter.h"
 #include "BeebSCSI/scsi.h"

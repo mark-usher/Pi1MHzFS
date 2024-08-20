@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include "Pi1MHz.h"
 #include "ram_emulator.h"
+#include "BeebSCSI/fatfs/ff.h"  // needs type FIL in following filesystem.h include
 #include "BeebSCSI/filesystem.h"
 #include "scripts/gitversion.h"
 #include "rpi/info.h"

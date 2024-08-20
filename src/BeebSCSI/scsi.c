@@ -45,10 +45,11 @@
 // Local includes
 
 #include "debug.h"
+#include "fatfs/ff.h"
+#include "filesystem.h"
 #include "scsi.h"
 #include "ext_attributes.h"
 #include "hostadapter.h"
-#include "filesystem.h"
 #include "statusled.h"
 
 // Uncomment next line to enable Fcode support
@@ -1597,7 +1598,7 @@ static uint8_t scsiCommandModeSelect6(void)
 		while (((uint8_t)sizeof(Buffer) >= (uint8_t)(PageLength + start + 2))) {
 			// set data pointer to the start of the block of data starting with the page
 			dataptr = Buffer + start;
-			if ((writeModePage(commandDataBlock.targetLUN, dataptr)) !=0) {
+			if ((replaceModePage(commandDataBlock.targetLUN, dataptr)) !=0) {
 		      if (debugFlag_scsiCommands)debugString_C(PSTR("SCSI Commands: Writing MODE SELECT Bad Argument error\r\n"), DEBUG_ERROR);
 
 				// Indicate unsuccessful command in status and message

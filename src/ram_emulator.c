@@ -33,6 +33,7 @@ Millipede PRISMA-3 (Not support)
 #include "rpi/info.h"
 #include <stdlib.h>
 #include "scripts/gitversion.h"
+#include "BeebSCSI/fatfs/ff.h"  // needs type FIL in following filesystem.h include
 #include "BeebSCSI/filesystem.h"
 
 static uint8_t rambyte_address;
