@@ -579,82 +579,6 @@ bool filesystemCheckLunImage(uint8_t lunNumber)
    return true;
 }
 
-// Check an extended attributes file is available for that LUN
-// and register it
-bool filesystemCheckExtAttributes( uint8_t lunNumber)
-{
-
-   FRESULT fsResult;
-   FIL fileObject;
-
-   sprintf(extAttributes_fileName, "/BeebSCSI%d/scsi%d.ext", filesystemState.lunDirectory, lunNumber);
-
-   // Check if the LUN extended attributes file (.ext) is present
-   if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckLunImage(): Checking for (.ext) LUN extended attributes file\r\n"));
-
-   fsResult = f_open(&fileObject, extAttributes_fileName, FA_READ);
-
-   if (fsResult != FR_OK) {
-      // LUN extended properties file is not found
-      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckLunImage(): LUN extended attributes file not found\r\n"));
-
-      // continue using values from .dsc file and other generic defaults
-		filesystemState.fsLunHasExtendedAttributes[lunNumber] = false;
-
-   } else {
-      // LUN extended attributes file is present
-      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckLunImage(): LUN extended attributes file found\r\n"));
-
-      // Read the extended attributes from the .ext file
-		filesystemState.fsLunHasExtendedAttributes[lunNumber] = true;
-
-   }
-
-	// Update the cached geomety for this LUN from the extended attributes
-   uint8_t Buffer[24];
-
-	// Try read page 3
-	if (readModePage(lunNumber, 3, 24, Buffer) !=0) {
-		filesystemState.fsLunGeometry[lunNumber].BlockSize = (uint32_t)(((Buffer[9] << 16) + (Buffer[10] << 8) + Buffer[11]) & 0x00FFFFFF);
-		filesystemState.fsLunGeometry[lunNumber].SectorsPerTrack = (uint32_t)(((Buffer[22] << 8) + Buffer[23]) & 0x0000FFFF);
-	}
-	else
-	{
-		filesystemState.fsLunGeometry[lunNumber].SectorsPerTrack = DEFAULT_SECTORS_PER_TRACK;
-		// write with mode select
-	}
-
-	if (readModePage(lunNumber, 4, 18, Buffer) !=0) {
-		// Calculate the number of (block size) byte sectors required to fulfill the drive geometry
-		// tracks = heads * cylinders
-		// sectors = tracks * sectorsperTrack
-		filesystemState.fsLunGeometry[lunNumber].BlockSize = (uint32_t)(((Buffer[9] << 16) + (Buffer[10] << 8) + Buffer[11]) & 0x00FFFFFF);
-		filesystemState.fsLunGeometry[lunNumber].Cylinders = (uint32_t)(((Buffer[9] << 14) + (Buffer[15] << 8) + Buffer[16]) & 0x00FFFFFF);
-		filesystemState.fsLunGeometry[lunNumber].Heads = (uint8_t)(Buffer[17]);
-	}
-	else
-	{
-		filesystemState.fsLunGeometry[lunNumber].BlockSize = DEFAULT_BLOCK_SIZE;
-		// try and calculate cylinders / heads automatically
-
-		// write with mode select
-	}
-
-	// Close the .ext file
-	f_close(&fileObject);
-
-	return filesystemState.fsLunHasExtendedAttributes[lunNumber];
-}
-
-// Check if a LUN has registered extended attributes when it was started
-// and ensure the extAttributes filename is correct for the LUN
-bool filesystemHasExtAttributes( uint8_t lunNumber)
-{
-   sprintf(extAttributes_fileName, "/BeebSCSI%d/scsi%d.ext", filesystemState.lunDirectory, lunNumber);
-	return filesystemState.fsLunHasExtendedAttributes[lunNumber];
-}
-
-
 // Function to calculate the LUN image size from the LUN descriptor file parameters
 uint32_t filesystemGetLunSizeFromDsc( uint8_t lunNumber)
 {
@@ -1106,6 +1030,260 @@ bool filesystemFormatLun(uint8_t lunNumber, uint8_t dataPattern)
    if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemFormatLun(): Successful\r\n"));
    return true;
 }
+
+// Functions for creating and using LUN extended attributes-------------------------------------------------------------------
+
+// Function to create a LUN Extended attributes tmp file for writing (makes an empty .tmp file)
+bool filesystemCreateLunExtAttributes_tmp(uint8_t lunNumber)
+{
+	FRESULT fsResult;
+   FIL fileObject;
+
+   // Assemble the .external attributes as a temp file
+   sprintf(fileName, "/BeebSCSI%d/scsi%d.tmp", filesystemState.lunDirectory, lunNumber);
+
+   fsResult = f_open(&fileObject, fileName, FA_READ);
+   if (fsResult == FR_OK) {
+      // File opened ok - which means it already exists...
+      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCreateLunExtAttributes_tmp: .tmp already exists - ignoring request to create a new .tmp\r\n"));
+      f_close(&fileObject);
+      return true;
+   }
+
+   // Create a new .tmp Extended attributes file
+   fsResult = f_open(&fileObject, fileName, FA_CREATE_NEW);
+   if (fsResult != FR_OK) {
+      // Create .ext file failed
+      if (debugFlag_filesystem) { 
+			debugString_P(PSTR("File system: filesystemCreateLunExtAttributes_tmp: ERROR: Could not create new .tmp file!\r\n"));
+      	debugStringInt16_P(PSTR("File system: filesystemCreateLunExtAttributes_tmp: ERROR = "), fsResult, true);
+		}
+		return false;
+   }
+
+   // LUN .tmp external attributes file created successfully
+   f_close(&fileObject);
+   if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCreateLunExtAttributes(): Successful\r\n"));
+   return true;
+}
+
+// Function to rename a LUN Extended attributes .tmp file to a .ext file
+bool filesystemCreateLunExtAttributes_Rename(uint8_t lunNumber)
+{
+	FRESULT fsResult;
+	char fileName_source[255];
+
+   // Assemble the names of the source and destination file
+   sprintf(fileName_source, "/BeebSCSI%d/scsi%d.tmp", filesystemState.lunDirectory, lunNumber);
+   sprintf(fileName, "/BeebSCSI%d/scsi%d.ext", filesystemState.lunDirectory, lunNumber);
+
+	fsResult = f_rename (fileName_source, fileName);
+
+   if (fsResult != FR_OK) {
+      // File did not rename successfully
+      if (debugFlag_filesystem) {
+			debugString_P(PSTR("File system: filesystemCreateLunExtAttributes_Rename(): File Not Copied\r\n"));
+      	debugStringInt16_P(PSTR("File system: filesystemCreateDscFromLunImage(): ERROR = "), fsResult, true);
+		}
+      return false;
+   }
+
+   // LUN external attributes file created successfully
+   if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCreateLunExtAttributes_Rename(): Successful\r\n"));
+   
+	filesystemState.fsLunHasExtendedAttributes[lunNumber] = true;
+
+	return true;
+}
+
+// Function to write all values to to a .ext tmp file
+bool filesystemCreateLunExtAttributes_WriteValues(uint8_t lunNumber)
+{
+	FRESULT fsResult_ext;
+	FRESULT fsResult_tmp;
+   FIL fileObject_ext;
+   FIL fileObject_tmp;
+	char fileName_tmp[255];
+	uint8_t newdata[512];
+	bool usedefaults = false;
+
+	// if the .tmp file cannot be opened (it doesn't exist), create it
+	if (!filesystemCreateLunExtAttributes_tmp(lunNumber)) {
+      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCreateLunExtAttributes_WriteValues: Major Error. .tmp file not accessible\r\n"));
+		return false;
+	}
+
+   // Assemble the file name of the extended attributes temp file
+   sprintf(fileName, "/BeebSCSI%d/scsi%d.ext", filesystemState.lunDirectory, lunNumber);
+   sprintf(fileName_tmp, "/BeebSCSI%d/scsi%d.tmp", filesystemState.lunDirectory, lunNumber);
+
+	// if an .ext file cannot be opened (it doesn't exist), flag to use defaults values
+   fsResult_ext = f_open(&fileObject_ext, fileName, FA_READ);
+   if (fsResult_ext != FR_OK) {
+      // File didn't open, use stored default values ...
+      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCreateLunExtAttributes_WriteValues: No existing .ext file for the LUN. Using default values\r\n"));
+		usedefaults = true;
+      f_close(&fileObject_ext);
+   }
+	else
+	{
+     f_close(&fileObject_ext);
+	}
+
+	// Open .tmp file for writing
+   fsResult_tmp = f_open(&fileObject_tmp, fileName_tmp, FA_WRITE);
+	if (fsResult_tmp == FR_OK) {
+
+		// copy all stored defalult values
+		if (usedefaults) {
+
+			// set up the list of default pages
+
+			uint8_t default_NonModePageTokens[3] = {TOKEN_INQUIRY, TOKEN_MPHEADER, TOKEN_LBADESCRIPTOR};
+			uint8_t default_ModePageTokens[9] = {1,3,4,32,33,35,36,37,38};
+			uint8_t buff[2];
+
+			// loop through the default Mode Pages that need creating
+			buff[1] = 0; // length (0=default values)
+
+			// loop through the default Non Mode Pages that need creating
+			for (uint8_t i = 0; i < sizeof(default_NonModePageTokens); i++) {
+				if (createNonModePage(usedefaults, default_NonModePageTokens[i], buff, newdata) == 0)
+					filesystemWriteline(&fileObject_tmp, newdata);
+				else
+					if (debugFlag_filesystem) debugStringInt16_P(PSTR("File system: filesystemCreateLunExtAttributes_WriteValues(): ERROR: No value returned for non page mode token "), default_NonModePageTokens[i], true);
+			}	
+
+			// loop through the default Mode Pages that need creating
+			for (uint8_t i = 0; i < sizeof(default_ModePageTokens); i++) {
+				buff[0] = default_ModePageTokens[i];
+
+				if (createModePage(lunNumber, buff, newdata) == 0)
+					filesystemWriteline(&fileObject_tmp, newdata);
+				else
+					if (debugFlag_filesystem) debugStringInt16_P(PSTR("File system: filesystemCreateLunExtAttributes_WriteValues(): ERROR: No Mode Page value returned for page "), buff[0], true);
+
+			}
+
+		}
+		else {
+			// .ext file open for reading. Loop through and copy all values	
+			f_close(&fileObject_ext);
+		}
+	}
+
+	// close .tmp file
+   f_close(&fileObject_tmp);
+
+   // LUN external attributes written to temp file successfully
+   if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCreateLunExtAttributes_WriteValues(): Attributes written to tmp file successfully\r\n"));
+   
+	// rename .tmp file to .ext file
+	return filesystemCreateLunExtAttributes_Rename(lunNumber);
+
+}
+
+// Check an extended attributes file is available for that LUN
+// and register it
+bool filesystemCheckExtAttributes( uint8_t lunNumber)
+{
+
+   FRESULT fsResult;
+   FIL fileObject;
+
+   sprintf(extAttributes_fileName, "/BeebSCSI%d/scsi%d.ext", filesystemState.lunDirectory, lunNumber);
+
+   // Check if the LUN extended attributes file (.ext) is present
+   if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckExtAttributes: Checking for (.ext) LUN extended attributes file\r\n"));
+
+   fsResult = f_open(&fileObject, extAttributes_fileName, FA_READ);
+
+   if (fsResult != FR_OK) {
+      // LUN extended properties file is not found
+      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckExtAttributes: LUN extended attributes file not found\r\n"));
+		
+		
+		filesystemCreateLunExtAttributes_WriteValues(lunNumber);
+      
+		
+		// continue using values from .dsc file and other generic defaults
+		// filesystemState.fsLunHasExtendedAttributes[lunNumber] = false;
+
+   } else {
+      // LUN extended attributes file is present
+      if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemCheckExtAttributes: LUN extended attributes file found\r\n"));
+
+      // Read the extended attributes from the .ext file
+		filesystemState.fsLunHasExtendedAttributes[lunNumber] = true;
+
+   }
+
+	// Update the cached geomety for this LUN from the extended attributes
+   uint8_t Buffer[24];
+
+	// Try read page 3
+	if (readModePage(lunNumber, 3, 24, Buffer) !=0) {
+		filesystemState.fsLunGeometry[lunNumber].BlockSize = (uint32_t)(((Buffer[9] << 16) + (Buffer[10] << 8) + Buffer[11]) & 0x00FFFFFF);
+		filesystemState.fsLunGeometry[lunNumber].SectorsPerTrack = (uint32_t)(((Buffer[22] << 8) + Buffer[23]) & 0x0000FFFF);
+	}
+	else
+	{
+		filesystemState.fsLunGeometry[lunNumber].SectorsPerTrack = DEFAULT_SECTORS_PER_TRACK;
+		// write with mode select
+	}
+
+	if (readModePage(lunNumber, 4, 18, Buffer) !=0) {
+		// Calculate the number of (block size) byte sectors required to fulfill the drive geometry
+		// tracks = heads * cylinders
+		// sectors = tracks * sectorsperTrack
+		filesystemState.fsLunGeometry[lunNumber].BlockSize = (uint32_t)(((Buffer[9] << 16) + (Buffer[10] << 8) + Buffer[11]) & 0x00FFFFFF);
+		filesystemState.fsLunGeometry[lunNumber].Cylinders = (uint32_t)(((Buffer[9] << 14) + (Buffer[15] << 8) + Buffer[16]) & 0x00FFFFFF);
+		filesystemState.fsLunGeometry[lunNumber].Heads = (uint8_t)(Buffer[17]);
+	}
+	else
+	{
+		filesystemState.fsLunGeometry[lunNumber].BlockSize = DEFAULT_BLOCK_SIZE;
+		// try and calculate cylinders / heads automatically
+
+		// write with mode select
+	}
+
+	// Close the .ext file
+	f_close(&fileObject);
+
+	return filesystemState.fsLunHasExtendedAttributes[lunNumber];
+}
+
+// Check if a LUN has registered extended attributes when it was started
+// and ensure the extAttributes filename is correct for the LUN
+bool filesystemHasExtAttributes( uint8_t lunNumber)
+{
+   sprintf(extAttributes_fileName, "/BeebSCSI%d/scsi%d.ext", filesystemState.lunDirectory, lunNumber);
+	return filesystemState.fsLunHasExtendedAttributes[lunNumber];
+}
+
+
+uint8_t filesystemWriteline(FIL* fileObject, uint8_t *outString) {
+
+	FRESULT fsResult;
+	UINT fsCounter;
+	size_t len;
+
+	len = strlen(outString);
+
+	fsResult = f_write(fileObject, outString, len, &fsCounter);
+
+	// Check that the file was written OK and is the correct length
+	if (fsResult != FR_OK  && fsCounter == len) {
+		// Something went wrong
+		if (debugFlag_filesystem) debugString_P(PSTR("File system: filesystemWriteline: ERROR: writing Mode Page value\r\n"));
+		return 1;
+	}
+
+	return 0;
+
+}
+
 
 // Functions for reading and writing LUN images --------------------------------------------------------------------
 

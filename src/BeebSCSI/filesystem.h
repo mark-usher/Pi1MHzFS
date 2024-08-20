@@ -59,6 +59,12 @@ void filesystemReadLunUserCode(uint8_t lunNumber, uint8_t userCode[5]);
 bool filesystemCheckLunDirectory(uint8_t lunDirectory);
 bool filesystemCheckLunImage(uint8_t lunNumber);
 
+bool filesystemCreateLunExtAttributes_tmp(uint8_t lunNumber);
+bool filesystemCreateLunExtAttributes_Rename(uint8_t lunNumber);
+bool filesystemCreateLunExtAttributes_WriteValues(uint8_t lunNumber);
+
+uint8_t filesystemWriteline(FIL* fileObject, uint8_t *outString);
+
 bool filesystemCheckExtAttributes( uint8_t lunNumber);
 bool filesystemHasExtAttributes( uint8_t lunNumber);
 
