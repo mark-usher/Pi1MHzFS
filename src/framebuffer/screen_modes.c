@@ -1004,7 +1004,7 @@ void default_init_screen(screen_mode_t *screen, font_t *font) {
     }
 
     // On the Pi 2/3 the mailbox returns the address with bits 31..30 set, which is wrong
-    fb = (unsigned char *)(((unsigned int) fb) & 0x3fffffff);
+    fb = (unsigned char *)(((uint32_t) fb) & 0x3fffffff);
 
     // Initialize colour table and palette
     screen->font = font;
@@ -1033,7 +1033,7 @@ void default_clear_screen(const screen_mode_t *screen, const t_clip_window_t *te
    // Clear to the background colour
    for (int y = r.y1; y <= r.y2; y++) {
       // Special case the black lines in BBC Gap Modes
-      pixel_t col = (screen->mode_flags & F_BBC_GAP) && (y % 10 < 2) ? BBC_GAP_COL : bg_col;
+      pixel_t col = ( (screen->mode_flags & F_BBC_GAP) && (y % 10 < 2) ) ? BBC_GAP_COL : bg_col;
       for (int x = r.x1; x <= r.x2; x++) {
          screen->set_pixel(screen, x, y, col);
       }
@@ -1091,7 +1091,7 @@ void default_scroll_screen(screen_mode_t *screen, const t_clip_window_t *text_wi
    // Blank the top/bottom line
    for (int y = blank; y <  blank + font_height; y++) {
       // Special case the black lines in BBC Gap Modes
-      pixel_t col = (screen->mode_flags & F_BBC_GAP) && (y % 10 < 2) ? BBC_GAP_COL : bg_col;
+      pixel_t col =  ( (screen->mode_flags & F_BBC_GAP) && (y % 10 < 2) ) ? BBC_GAP_COL : bg_col;
       for (int x = r.x1; x <= r.x2; x++) {
          screen->set_pixel(screen, x, y, col);
       }
