@@ -19,6 +19,7 @@ machine with the ROM fitted depends on:
 
 usage: check_rom.py ROM
 """
+import re
 import sys
 
 try:
@@ -263,6 +264,8 @@ def main(path):
           "the copyright offset points at the 0 before (C), as the helpers' loader tests")
     check(rom[8] == 1, "binary version byte")
     check(rom[9:16] == b"TelnetD", "title")
+    ver = rom[17:rom.index(0, 17)]
+    check(re.fullmatch(rb"\d+\.\d+ b\d+", ver) is not None, f"*HELP shows a version and a build number: {ver!r}")
 
     # 1. reset with the Pi already up (CTRL-BREAK)
     for a, x, y in ((1, 5, 3), (1, 15, 0), (1, 0, 255), (1, 7, 7)):

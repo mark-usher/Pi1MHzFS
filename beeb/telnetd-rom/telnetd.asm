@@ -44,6 +44,7 @@ CMDPTR = &F2                \ service call 4: the command line, and Y its offset
 HELPER_ENTRY = &FC88        \ the helper window: STX &FC88 / NOP / JMP &FD00
 HELPER_OPCODE = &8E         \ the Pi writes STX abs here, so it is there only if a Pi1MHz answers
 TELNET_HELPER = 20
+BUILD = 1                   \ the build number in the version string, so *HELP says which image is fitted
 INSV = &022A                \ the MOS vectors: keyboard buffer insertion ...
 IRQ1V = &0204               \ ... and the interrupt
 REMV = &022C                \ buffer remove, vector 22: foreground code polls it while it waits for a key
@@ -66,7 +67,7 @@ GUARD &C000
                 equb 1                      \ binary version
 .romtitle       equs "TelnetD"
                 equb 0
-.romversion     equs "0.1"
+.romversion     equs "0.2 b" + STR$(BUILD)         \ *HELP shows it: BUILD is bumped for every image that is tried on a machine
 .copyright      equb 0
                 equs "(C)2026 Pi1MHz"
                 equb 0

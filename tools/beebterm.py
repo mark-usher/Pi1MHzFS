@@ -29,22 +29,47 @@ ECHO, SGA = 1, 3
 
 
 class Screen:
-    """A text screen fed with the ANSI the daemon produces."""
+    """A text screen fed with the ANSI the daemon produces, behaving as xterm does for every
+    sequence the daemon sends: cursor moves (H A B C D G), erase (J K), the scroll region
+    (r, which also puts the cursor home), scrolling (S T), colours and reverse video (m), and
+    the cursor shown or hidden (?25).  Each cell keeps its colours, for colour checks."""
 
     def __init__(self, rows=25, cols=80):
         self.rows, self.cols = rows, cols
+        self.fg, self.bg, self.rev = 7, 0, False
+        self.cursor_on = True
         self.clear()
         self._esc = None
 
+    def _blank(self):
+        return [" "] * self.cols, [(7, 0, False)] * self.cols
+
     def clear(self):
         self.grid = [[" "] * self.cols for _ in range(self.rows)]
+        self.attr = [[(7, 0, False)] * self.cols for _ in range(self.rows)]
         self.r = self.c = 0
+        self.top, self.bot = 0, self.rows - 1
+
+    def _scroll_up(self, n=1):
+        for _ in range(n):
+            del self.grid[self.top]
+            del self.attr[self.top]
+            g, a = self._blank()
+            self.grid.insert(self.bot, g)
+            self.attr.insert(self.bot, a)
+
+    def _scroll_down(self, n=1):
+        for _ in range(n):
+            del self.grid[self.bot]
+            del self.attr[self.bot]
+            g, a = self._blank()
+            self.grid.insert(self.top, g)
+            self.attr.insert(self.top, a)
 
     def _newline(self):
-        if self.r == self.rows - 1:
-            self.grid.pop(0)
-            self.grid.append([" "] * self.cols)
-        else:
+        if self.r == self.bot:
+            self._scroll_up()
+        elif self.r < self.rows - 1:
             self.r += 1
 
     def feed(self, data):
@@ -73,27 +98,86 @@ class Screen:
                     self.c = 0
                     self._newline()
                 self.grid[self.r][self.c] = ch
+                self.attr[self.r][self.c] = (self.fg, self.bg, self.rev)
                 self.c += 1
 
     def _csi(self, params, final):
+        if params.startswith("?"):
+            if params[1:] == "25":
+                self.cursor_on = final == "h"
+            return
         nums = [int(p) if p.isdigit() else 0 for p in params.split(";")] if params else []
         n = nums[0] if nums and nums[0] else 1
-        if final == "H":
+        if final in "Hf":
             self.r = min(self.rows - 1, (nums[0] if nums and nums[0] else 1) - 1)
             self.c = min(self.cols - 1, (nums[1] if len(nums) > 1 and nums[1] else 1) - 1)
-        elif final == "J" and params == "2":
-            self.clear()
         elif final == "A":
-            self.r = max(0, self.r - n)
+            self.r = max(self.top if self.r >= self.top else 0, self.r - n)
+        elif final == "B":
+            self.r = min(self.bot if self.r <= self.bot else self.rows - 1, self.r + n)
         elif final == "C":
             self.c = min(self.cols - 1, self.c + n)
-        # 'm' (colours) and anything else: nothing to show in text
+        elif final == "D":
+            self.c = max(0, self.c - n)
+        elif final == "G":
+            self.c = min(self.cols - 1, n - 1)
+        elif final == "J":
+            mode = nums[0] if nums else 0
+            if mode == 2:
+                keep = (self.r, self.c)
+                self.grid = [[" "] * self.cols for _ in range(self.rows)]
+                self.attr = [[(7, 0, False)] * self.cols for _ in range(self.rows)]
+                self.r, self.c = keep                   # xterm: 2J leaves the cursor where it is
+            elif mode == 0:
+                for x in range(self.c, self.cols):
+                    self.grid[self.r][x] = " "
+                for y in range(self.r + 1, self.rows):
+                    self.grid[y], self.attr[y] = self._blank()
+            elif mode == 1:
+                for x in range(0, self.c + 1):
+                    self.grid[self.r][x] = " "
+                for y in range(0, self.r):
+                    self.grid[y], self.attr[y] = self._blank()
+        elif final == "K":
+            mode = nums[0] if nums else 0
+            xs = range(self.c, self.cols) if mode == 0 else range(0, self.c + 1) if mode == 1 else range(self.cols)
+            for x in xs:
+                self.grid[self.r][x] = " "
+        elif final == "r":
+            t = (nums[0] if nums and nums[0] else 1) - 1
+            bt = (nums[1] if len(nums) > 1 and nums[1] else self.rows) - 1
+            if 0 <= t < bt < self.rows:
+                self.top, self.bot = t, bt
+            self.r = self.c = 0                         # xterm: setting the region homes the cursor
+        elif final == "S":
+            self._scroll_up(n)
+        elif final == "T":
+            self._scroll_down(n)
+        elif final == "m":
+            for v in (nums or [0]):
+                if v == 0:
+                    self.fg, self.bg, self.rev = 7, 0, False
+                elif v == 7:
+                    self.rev = True
+                elif v == 27:
+                    self.rev = False
+                elif 30 <= v <= 37:
+                    self.fg = v - 30
+                elif 40 <= v <= 47:
+                    self.bg = v - 40
+                elif 90 <= v <= 97:
+                    self.fg = v - 90 + 8
+                elif 100 <= v <= 107:
+                    self.bg = v - 100 + 8
 
     def text(self):
         lines = ["".join(row).rstrip() for row in self.grid]
         while lines and not lines[-1]:
             lines.pop()
         return "\n".join(lines)
+
+    def fg_at(self, row, col):
+        return self.attr[row][col][0]
 
 
 class BeebTerm:

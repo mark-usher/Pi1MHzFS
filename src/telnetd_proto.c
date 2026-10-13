@@ -381,6 +381,7 @@ void tnd_out_set_mode(tnd_out_t *s, uint8_t mode)
    scr_default_palette(s);
    s->cc_on = s->hl_on = false;
    s->npend = 0u;
+   s->dirty = false;                             /* a new screen: nothing left to draw again */
    memset(s->ch, ' ', sizeof s->ch);
    memset(s->at, AT_KNOWN | AT_DEF, sizeof s->at);
 }
@@ -563,8 +564,22 @@ static bool full_width(const tnd_out_t *s)
    return s->wl == 0u && s->wr == s->cols - 1u;
 }
 
+/* A rectangle the terminal now shows wrong, to be drawn again from the model. */
+static void mark_dirty(tnd_out_t *s, unsigned l, unsigned t, unsigned r, unsigned b)
+{
+   if (!s->dirty) {
+      s->dl = (uint8_t)l; s->dt = (uint8_t)t; s->dr = (uint8_t)r; s->db = (uint8_t)b;
+      s->dirty = true;
+      return;
+   }
+   if (l < s->dl) s->dl = (uint8_t)l;
+   if (t < s->dt) s->dt = (uint8_t)t;
+   if (r > s->dr) s->dr = (uint8_t)r;
+   if (b > s->db) s->db = (uint8_t)b;
+}
+
 /* The text window scrolls up one line.  The terminal is told to as well when the
-   window is as wide as the screen; for a narrower one it is left to drift. */
+   window is as wide as the screen; a narrower one is drawn again (tnd_out_dirty_row). */
 static size_t scr_scroll_up(tnd_out_t *s, uint8_t *dst)
 {
    size_t n = 0u;
@@ -588,6 +603,8 @@ static size_t scr_scroll_up(tnd_out_t *s, uint8_t *dst)
       n += put_num(dst + n, (unsigned)s->wb + 1u);
       dst[n++] = 'r';
       n += put_str(dst + n, "\x1b[1S\x1b[r");
+   } else if (s->sync && s->origin_ok) {
+      mark_dirty(s, s->wl, s->wt, s->wr, s->wb);
    }
    return n;
 }
@@ -615,6 +632,8 @@ static size_t scr_scroll_down(tnd_out_t *s, uint8_t *dst)
       n += put_num(dst + n, (unsigned)s->wb + 1u);
       dst[n++] = 'r';
       n += put_str(dst + n, "\x1b[1T\x1b[r");
+   } else if (s->sync && s->origin_ok) {
+      mark_dirty(s, s->wl, s->wt, s->wr, s->wb);
    }
    return n;
 }
@@ -825,18 +844,30 @@ size_t tnd_out_byte(tnd_out_t *s, uint8_t c, uint8_t dst[TND_OUT_MAX])
          }
          break;
       case 12:                                  /* CLS: the window is cleared, the cursor to its corner */
-         if (full_width(s) && s->wt == 0u && s->wb == s->rows - 1u) {
-            scr_clear(s, 0u, 0u, (unsigned)s->cols - 1u, (unsigned)s->rows - 1u);
-            s->sync = true;
-         } else {
-            scr_clear(s, s->wl, s->wt, s->wr, s->wb);
-         }
-         s->cx = s->wl; s->cy = s->wt;
          s->hl_on = s->cc_on = false;
          s->npend = 0u;
          s->colok = true;
-         s->origin_ok = true;
-         n = put_str(dst, "\x1b[2J\x1b[H");
+         if (full_width(s) && s->wt == 0u && s->wb == s->rows - 1u) {
+            scr_clear(s, 0u, 0u, (unsigned)s->cols - 1u, (unsigned)s->rows - 1u);
+            s->sync = true;
+            s->dirty = false;
+            s->cx = s->wl; s->cy = s->wt;
+            s->origin_ok = true;
+            n = put_str(dst, "\x1b[2J\x1b[H");
+         } else if (s->sync && s->origin_ok) {   /* only the window: drawn again, nothing else touched */
+            scr_clear(s, s->wl, s->wt, s->wr, s->wb);
+            s->cx = s->wl; s->cy = s->wt;
+            mark_dirty(s, s->wl, s->wt, s->wr, s->wb);
+            n = put_pos(dst, s->cx, s->cy);
+         } else {                                /* the terminal's rows are not the Beeb's yet: start them */
+            scr_clear(s, s->wl, s->wt, s->wr, s->wb);
+            s->cx = s->wl; s->cy = s->wt;
+            s->origin_ok = true;
+            n = put_str(dst, "\x1b[2J");
+            if (s->sync)                         /* what is outside the window comes back */
+               mark_dirty(s, 0u, 0u, (unsigned)s->cols - 1u, (unsigned)s->rows - 1u);
+            n += put_pos(dst + n, s->cx, s->cy);
+         }
          if (s->tele)
             s->coloured = false;
          break;
@@ -963,6 +994,7 @@ bool tnd_out_has_line(const tnd_out_t *s, const char *text, size_t len)
 void tnd_out_origin_lost(tnd_out_t *s)
 {
    s->origin_ok = false;
+   s->dirty = false;
    s->colok = true;                              /* the cursor's column is the Beeb's */
    s->hl_on = s->cc_on = false;
    s->npend = 0u;
@@ -1030,6 +1062,41 @@ size_t tnd_out_repaint(const tnd_out_t *s, unsigned row, uint8_t dst[TND_REPAINT
       dst[n++] = 13u;
       dst[n++] = 10u;
    }
+   return n;
+}
+
+size_t tnd_out_dirty_row(tnd_out_t *s, uint8_t dst[TND_REPAINT_MAX])
+{
+   size_t n = 0u;
+
+   if (!s->dirty)
+      return 0u;
+   if (!s->sync || !s->origin_ok || s->dt > s->db || s->dl > s->dr || s->db >= s->rows || s->dr >= s->cols) {
+      s->dirty = false;
+      return 0u;
+   }
+   unsigned y = s->dt;
+   uint8_t  prev = AT_DEF;
+   n += put_pos(dst, s->dl, y);
+   n += put_str(dst + n, "\x1b[0m");
+   for (unsigned x = s->dl; x <= s->dr; x++) {
+      uint8_t at = (s->at[y][x] & AT_KNOWN) != 0u ? (uint8_t)(s->at[y][x] & ~AT_KNOWN) : AT_DEF;
+      if (n + 24u > TND_REPAINT_MAX - 48u)
+         break;                                  /* a row of colour changes at every cell: cut it off */
+      if (at != prev) {
+         n += put_attr(s, dst + n, at);
+         prev = at;
+      }
+      n += put_glyph(s, dst + n, s->ch[y][x]);
+   }
+   n += put_str(dst + n, "\x1b[0m");
+   if (s->hl_on && s->hly == y && s->hlx >= s->dl && s->hlx <= s->dr)
+      s->hl_on = false;                          /* the copy cursor's mark was drawn over */
+   n += put_finish(s, dst + n);                  /* the Beeb's cursor and colours, for what comes next */
+   if (y >= s->db)
+      s->dirty = false;
+   else
+      s->dt = (uint8_t)(y + 1u);
    return n;
 }
 

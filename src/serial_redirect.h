@@ -10,6 +10,7 @@ void serial_redirect_status(char *buf, size_t len);
 
 /* Main loop only: the bytes the Beeb has sent, and room for / bytes to it. */
 size_t serial_redirect_read(uint8_t *dst, size_t max);
+bool   serial_redirect_pending(void);       /* the Beeb has printed something not read yet */
 size_t serial_redirect_room(void);
 
 /* The Beeb's screen MODE (0-7), reported by helper 20 each time it hooks in, and

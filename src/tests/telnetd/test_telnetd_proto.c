@@ -328,6 +328,53 @@ static const char *render(const void *data, size_t len, bool utf8, tnd_out_t *ke
 #define RENDER(lit) render(lit, sizeof(lit) - 1, true, NULL)
 #define OUT_IS(lit, expect) (strcmp(RENDER(lit), expect) == 0)
 
+/* A narrow text window: the terminal cannot scroll or clear part of a line, so the model does
+   and the rectangle is drawn again, a row at a time, from the model. */
+static void test_narrow_window(void)
+{
+   tnd_out_t o;
+   uint8_t   d[TND_REPAINT_MAX];
+   tnd_out_reset(&o, true);
+   tnd_out_assume_mode(&o, 7);
+   (void)render("\x0c" "TOP", 4, true, &o);                     /* a full CLS: the rows are the Beeb's */
+   const char *r = render("\x1c\x02\x0a\x14\x03" "\x0c", 6, true, &o);  /* VDU 28,2,10,20,3 then CLS */
+   CHECK(strstr(r, "\x1b[2J") == NULL, "a CLS in a narrow window does not clear the whole terminal");
+   CHECK(o.dirty && o.dl == 2 && o.dt == 3 && o.dr == 20 && o.db == 10, "... the window is marked to be drawn again");
+   CHECK(o.ch[0][0] == 'T' && o.ch[0][1] == 'O', "... and what is outside it is kept");
+   CHECK(o.cx == 2 && o.cy == 3, "... the cursor is at the window's corner");
+   unsigned rows = 0;
+   size_t   n;
+   char     first[TND_REPAINT_MAX + 1];
+   first[0] = 0;
+   while ((n = tnd_out_dirty_row(&o, d)) != 0u) {
+      if (rows == 0u) { memcpy(first, d, n); first[n] = 0; }
+      rows++;
+      CHECK(n <= TND_REPAINT_MAX, "a drawn row fits");
+      if (rows > 40u) break;
+   }
+   CHECK(rows == 8u, "the window's eight rows are drawn");
+   CHECK(strncmp(first, "\x1b[4;3H", 6) == 0, "... from its top left corner");
+   CHECK(!o.dirty, "... and then nothing is left to draw");
+
+   /* scrolling inside it: the rows move in the model and are drawn again */
+   for (int i = 1; i <= 12; i++) {
+      char line[8];
+      int  len = snprintf(line, sizeof line, "W%d\r\n", i);
+      (void)render(line, (size_t)len, true, &o);
+   }
+   CHECK(o.dirty, "a scroll in the window marks it");
+   CHECK(o.ch[10][2] == ' ' && o.ch[9][2] == 'W' && o.ch[9][3] == '1' && o.ch[9][4] == '2', "the model has scrolled: W12 on the window's last row but one");
+   CHECK(o.ch[0][0] == 'T', "the line above the window did not move");
+   while (tnd_out_dirty_row(&o, d) != 0u) {}
+   CHECK(!o.dirty, "drawn again");
+
+   /* a CLS while the terminal's rows are not yet the Beeb's starts them, and the rest comes back */
+   tnd_out_origin_lost(&o);
+   r = render("\x0c", 1, true, &o);
+   CHECK(strstr(r, "\x1b[2J") != NULL && o.origin_ok, "without an origin the terminal is cleared and gets one");
+   CHECK(o.dirty && o.dl == 0 && o.dt == 0 && o.db == o.rows - 1u, "... and the whole screen is drawn again");
+}
+
 static void test_output_text(void)
 {
    CHECK(OUT_IS("PRINT 42", "PRINT 42"), "text passes");
@@ -721,6 +768,7 @@ int main(void)
    test_negotiation();
    test_break_key();
    test_blank();
+   test_narrow_window();
    test_input_robustness();
    test_output_text();
    test_output_params();

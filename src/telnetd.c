@@ -736,6 +736,16 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
       k_push(SCAN_KEY);
    }
 
+   /* A narrow text window that scrolled or was cleared is drawn again from the model,
+      a row at a time, once the Beeb has nothing more to print for now. */
+   if (g_out.dirty && g_stage == S_LIVE && g_pcb != NULL && !g_repaint && !serial_redirect_pending()
+       && o_room() >= TND_REPAINT_MAX + 2u) {
+      uint8_t db[TND_REPAINT_MAX];
+      size_t  dn = tnd_out_dirty_row(&g_out, db);
+      if (dn != 0u)
+         o_put(db, dn);
+   }
+
    /* The copy cursor's mark, once the Beeb has been quiet for a moment and has
       the keys. */
    if (g_pcb != NULL && g_stage == S_LIVE && g_copy && g_ansi && g_khead == g_ktail

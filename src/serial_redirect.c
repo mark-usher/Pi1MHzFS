@@ -341,6 +341,11 @@ static void ser_control(unsigned int gpio)
 
 static bool ser_tx_drained;       /* the TX flag may need to go back to CLC */
 
+bool serial_redirect_pending(void)
+{
+   return fifo_used(&tx) != 0u;
+}
+
 size_t serial_redirect_read(uint8_t *dst, size_t max)
 {
    size_t n = 0u;

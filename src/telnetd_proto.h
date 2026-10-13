@@ -109,6 +109,8 @@ typedef struct {
    uint8_t  pend[8];            /* cursor keys waiting for the Beeb to be quiet */
    uint8_t  npend;
    uint32_t last_us;            /* when the Beeb last printed something */
+   bool     dirty;              /* a rectangle the terminal shows wrong (a narrow window scrolled or cleared) */
+   uint8_t  dl, dt, dr, db;     /* ... left, top (the next row to draw), right, bottom */
    uint8_t  ch[TND_ROWS_MAX][TND_COLS_MAX];   /* what is on each cell */
    uint8_t  at[TND_ROWS_MAX][TND_COLS_MAX];   /* and its colours; bit 7: seen, bit 6: no colour set */
 } tnd_out_t;
@@ -147,6 +149,12 @@ bool   tnd_out_has_line(const tnd_out_t *s, const char *text, size_t len);
 bool   tnd_out_blank(const tnd_out_t *s);   /* the model knows of no character on the screen */
 size_t tnd_out_colours(const tnd_out_t *s, uint8_t dst[16]);
 size_t tnd_out_repaint(const tnd_out_t *s, unsigned row, uint8_t dst[TND_REPAINT_MAX]);
+
+/* A text window narrower than the screen cannot be scrolled or cleared on a terminal, which
+   scrolls and clears whole lines.  The model does it, and marks the window as drawn wrong;
+   the daemon then calls this, a row at a time, until it says nothing is left (0): each call
+   draws one row of the rectangle from the model and puts the cursor and colours back. */
+size_t tnd_out_dirty_row(tnd_out_t *s, uint8_t dst[TND_REPAINT_MAX]);
 
 void   tnd_out_touch(tnd_out_t *s, uint32_t now_us);
 void   tnd_out_copykey(tnd_out_t *s, uint8_t key);
