@@ -342,6 +342,8 @@ static void test_narrow_window(void)
    CHECK(o.dirty && o.dl == 2 && o.dt == 3 && o.dr == 20 && o.db == 10, "... the window is marked to be drawn again");
    CHECK(o.ch[0][0] == 'T' && o.ch[0][1] == 'O', "... and what is outside it is kept");
    CHECK(o.cx == 2 && o.cy == 3, "... the cursor is at the window's corner");
+   r = render("ab\r", 3, true, &o);
+   CHECK(strstr(r, "\r\x1b[2C") != NULL, "a CR in the window goes to its left edge, not the terminal's");
    unsigned rows = 0;
    size_t   n;
    char     first[TND_REPAINT_MAX + 1];

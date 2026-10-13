@@ -638,6 +638,18 @@ static size_t scr_scroll_down(tnd_out_t *s, uint8_t *dst)
    return n;
 }
 
+/* After a CR the terminal is at column 0: a text window's left edge may be further in. */
+static size_t put_left(const tnd_out_t *s, uint8_t *dst)
+{
+   size_t n = 0u;
+   if (s->wl != 0u) {
+      dst[n++] = 27u; dst[n++] = '[';
+      n += put_num(dst + n, s->wl);
+      dst[n++] = 'C';
+   }
+   return n;
+}
+
 /* The cursor moves to the start of the next line, scrolling at the bottom. */
 static size_t scr_newline(tnd_out_t *s, uint8_t *dst)
 {
@@ -654,6 +666,7 @@ static size_t scr_newline(tnd_out_t *s, uint8_t *dst)
    } else if (s->colok) {                        /* the column is known: a CR LF is the Beeb's wrap */
       dst[n++] = 13u;
       dst[n++] = 10u;
+      n += put_left(s, dst + n);
       n += row_changed(s, dst + n);
    }
    return n;
@@ -881,6 +894,7 @@ size_t tnd_out_byte(tnd_out_t *s, uint8_t c, uint8_t dst[TND_OUT_MAX])
             s->bg = 0u;
          }
          dst[n++] = 13u;
+         n += put_left(s, dst + n);             /* to the window's left edge */
          break;
       case 21: s->disabled = true; break;
       case 26:                                  /* default windows, cursor home */
