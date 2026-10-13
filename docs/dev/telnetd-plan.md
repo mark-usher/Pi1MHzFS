@@ -264,12 +264,14 @@ changed registers. A store to &FF has no such hazard and is what the keyboard
 scan does.
 
 **How.** The stub grows by four bytes at its end (so no existing offset moves):
-`STA &FF / CLC / RTS` at +2D. `serial_redirect_escape()` makes the next trip
-through the stub an "escape trip": the Pi rewrites the low byte of the JSR's
-target (+18) from INSV's trampoline to that routine, gives it &80 as the byte, and
-opens the gate; the routine stores &80 in &FF and returns carry clear, so the
-stub reports "inserted" and the Pi's consume write arrives as usual, where the Pi
-points the JSR back at INSV in the same FIQ. One byte flips, between two whole
+`STA addr / RTS` at +2D (first `STA &FF / CLC / RTS`; the absolute store came
+with the RS423 idle trip below). `serial_redirect_escape()` makes the next trip
+through the stub an "escape trip": the Pi points the routine's store at &FF,
+rewrites the low byte of the JSR's target (+18) from INSV's trampoline to that
+routine, gives it &80 as the byte, and opens the gate; the routine stores &80 in
+&FF and returns the carry it came with, so the stub ends with its consume or its
+full write, and the Pi takes either as the end of the trip and points the JSR
+back at INSV in the same FIQ. One byte flips, between two whole
 call targets, so whatever the 6502 fetches is complete. Nothing is taken from the
 FIFO and nothing goes through the keyboard buffer, so a buffer full of type-ahead
 cannot hold it up. A trip that is interrupted (the gate closes before the consume)
@@ -516,3 +518,34 @@ bytes, too few for an "already loaded" test, which belongs in the new loader.
 Helper 20's own message is now `TelnetD`, with no leading space, like the ROM's
 title; being a line that starts with a letter it is kept with the boot banners.
 
+
+## RS423 idle flag (the *ROM / *TAPE hang)
+
+Found on a Model B with RTool's ROM filing system: with telnet hooked, `*ROM`
+then `*.` hung until ESCAPE whenever the Pi was present. Each character the MOS
+sends to RS423 first examines buffer 2 through REMV, finds it empty (the stub
+takes every byte), and so starts the transmitter: OS 1.2 &E0E8 -> &E170 clears
+bit 7 of &24F (RS423 busy) and enables the 6850's transmit interrupt. Only that
+interrupt sets the bit again, and with nothing on the RS423 port the 6850's CTS
+input is high, which holds transmit-empty and the interrupt off. The cassette and
+ROM filing systems wait for the bit before each operation (&FB1A), so they waited
+for ever. b-em asserts CTS, so it never showed there; helper 19 had it too.
+
+The fix is in serial_redirect.c: once the Beeb's output has been quiet for 2 ms
+(and once after each hook-in or reset) the Pi makes an "idle trip", the escape
+trip's routine pointed at &24F with &80, which is what the transmit interrupt
+would have stored, buffer 2 being empty.
+
+Two more MOS rules came out of the same hunt, both about the ROM filing system
+owning the 6850 (&EA = 1, set at &FB3D for each cassette or ROMFS operation):
+
+- While &EA is 1..&7F, OSWRCH sends nothing to RS423 (&E0DC), so what `*.` prints
+  is on the Beeb's screen only. The ROM (build 4) passes service call &0D on
+  untouched and writes &22 to the stub's control port; the Pi counts these
+  (`serial_redirect_unseen_gen`) and, once they stop for 100 ms, asks the ROM for
+  the screen, which it sends when the Beeb next reads the keyboard.
+- OS 1.2 never gives the 6850 back after a ROMFS operation, and selecting another
+  filing system does not either, so RS423 output stayed off for good after the
+  first `*CAT`. The ROM's REMV handler, on a keyboard read (never inside an
+  operation, each of which takes the 6850 again), sets &EA back to 0 when
+  &247 = 2 (ROMFS). The cassette's is left alone, a tape may still be running.

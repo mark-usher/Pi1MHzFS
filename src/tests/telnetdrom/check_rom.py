@@ -194,7 +194,7 @@ def run_command(rom, line, mode=1, screen=None, cur=(3, 4), hooked=True, stream0
     return st
 
 
-def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a=0x5A, mode=1, win=None):
+def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a=0x5A, mode=1, win=None, pokes=None):
     """Call the REMV handler the way the MOS's extended vector entry does, with the MOS's own
     routine modelled by a stub that returns Y=old_y and C=old_c.  Returns what happened."""
     boot = call(rom, 1, 6, 0, pi_after=0, reset_type=2)
@@ -210,6 +210,8 @@ def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a
     mem._subject[0x310] = 0
     if hooked:
         mem._subject[0x022A], mem._subject[0x022B] = 0xCC, 0xFC
+    for addr, b in (pokes or {}).items():
+        mem._subject[addr] = b
     for addr in (OSBYTE, OSWRCH, RETURN_TRAP):
         mem._subject[addr] = 0x60
     mem._subject[RETURN_TRAP] = 0xEA
@@ -262,7 +264,7 @@ def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a
         raise RuntimeError("the handler did not return")
     st["win_after"] = tuple(mem._subject[0x308 + i] for i in range(4))
     st.update(a=mpu.a, x=mpu.x, y=mpu.y, c=mpu.p & 1, v=(mpu.p >> 6) & 1, sp_after=mpu.sp, sp_before=sp_before,
-              old_calls=mem._subject[0x310])
+              old_calls=mem._subject[0x310], mem=mem)
     return st
 
 
@@ -347,7 +349,15 @@ def main(path):
         check(r["regs"] == (1, 9, 2) and r["sp_after"] == r["sp_before"], f"reset type {rt}, no Pi: registers and stack intact")
 
     # 4. everything else is passed on, with no OS call and no look at the Pi
-    for reason in (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 17, 254, 255):
+    # A ROM filing system operation (service &0D) is passed on untouched too, and with the stub
+    # hooked in (INSV in it) the Pi is told, &22 to the stub's control port at +28.
+    stub = {0x22A: 0xCC, 0x22B: 0xFC}
+    for hooked in (True, False):
+        r = call(rom, 0x0D, 6, 0x0B, pi_after=0, reset_type=1, pokes=stub if hooked else None, watch=(0xFCF4,))
+        check(r["helper_writes"] == [] and r["osbytes"] == [], f"service &0D (hooked={hooked}): no helper, no OS call")
+        check(r["regs"] == (0x0D, 6, 0x0B) and r["sp_after"] == r["sp_before"], f"service &0D (hooked={hooked}): passed on untouched, got {r['regs']}")
+        check(r["writes"] == ([(0xFCF4, 0x22)] if hooked else []), f"service &0D (hooked={hooked}): the Pi told once, got {r['writes']}")
+    for reason in (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 254, 255):
         r = call(rom, reason, 6, 4, pi_after=0, reset_type=1)
         check(r["helper_writes"] == [] and r["osbytes"] == [] and r["reads"] == 0, f"service {reason}: no helper, no OS call, no look at the Pi")
         check(r["regs"] == (reason, 6, 4) and r["sp_after"] == r["sp_before"], f"service {reason}: passed on untouched")
@@ -404,6 +414,12 @@ def main(path):
     check(r["stream"] == 1 and (r["cx"], r["cy"]) == (3, 1) and r["sp_after"] == r["sp_before"], "... with the output streams and the cursor as they were, and the stack balanced")
     r = run_remv(rom, 0, 1, 0, 0xFF, 0, screen=scr)
     check(r["y"] == 0xFF and r["c"] == 0 and r["pi"] == [] and r["old_calls"] == 1, "looking at the byte (V set) leaves it, and sends nothing")
+    # A keyboard read gives the 6850 back from the ROM filing system (&EA = 1 with &247 = 2),
+    # and only from it: not from the cassette, not the RS423 timeout count, not on a look.
+    for fs, ea, v, want in ((2, 1, 0, 0), (2, 0, 0, 0), (2, 0xE7, 0, 0xE7), (0, 1, 0, 1), (2, 1, 1, 1)):
+        r = run_remv(rom, 0, v, 0, 0x41, 0, pokes={0x247: fs, 0xEA: ea})
+        check(r["mem"]._subject[0xEA] == want and r["y"] == 0x41 and r["a"] == 0x5A and r["sp_after"] == r["sp_before"],
+              f"&247={fs} &EA={ea:#x} V={v}: &EA left {r['mem']._subject[0xEA]:#x}, want {want:#x}, the key and A kept")
     for x in (1, 2, 3, 9):
         r = run_remv(rom, x, 0, 0, 0xFF, 0, screen=scr)
         check(r["y"] == 0xFF and r["c"] == 0 and r["pi"] == [] and r["old_calls"] == 1 and r["x"] == x,

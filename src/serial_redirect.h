@@ -18,6 +18,7 @@ size_t serial_redirect_room(void);
 uint32_t serial_redirect_mode_gen(void);
 bool serial_redirect_scan_ok(void);        /* the ROM can send the Beeb's screen when a byte &FF is put in the keyboard buffer */
 uint32_t serial_redirect_reset_gen(void);   /* ... and one that counts the BBC's resets */
+uint32_t serial_redirect_unseen_gen(void);  /* ... and the ROM filing system operations, whose output RS423 never sees */
 uint8_t  serial_redirect_beeb_mode(void);
 void     serial_redirect_beeb_cursor(uint8_t *col, uint8_t *row);   /* ... and its text cursor */
 size_t serial_redirect_write(const uint8_t *src, size_t len);

@@ -36,6 +36,12 @@
 \ never claimed.  A, X and Y are given back as they came - the MOS keeps its
 \ slot number in X, and a ROM that does not claim the call must not change Y.
 \
+\ ROM FILING SYSTEM.  While the cassette or ROM filing system runs it owns the 6850,
+\ and the MOS sends nothing to RS423 (OS 1.2 &E0DC): what *CAT and friends print is
+\ on the Beeb's screen only.  Every ROM is offered service call &0D for each such
+\ operation, so this passes it on untouched and tells the Pi (&22 to the stub's
+\ control port), which then asks for the screen as above, after the operation.
+\
 \ Build: beeb/telnetd-rom/build.sh (needs beebasm).
 
 OSBYTE = &FFF4
@@ -46,7 +52,7 @@ CMDPTR = &F2                \ service call 4: the command line, and Y its offset
 HELPER_ENTRY = &FC88        \ the helper window: STX &FC88 / NOP / JMP &FD00
 HELPER_OPCODE = &8E         \ the Pi writes STX abs here, so it is there only if a Pi1MHz answers
 TELNET_HELPER = 20
-BUILD = 3                   \ the build number in the version string, so *HELP says which image is fitted
+BUILD = 4                \ the build number in the version string, so *HELP says which image is fitted
 INSV = &022A                \ the MOS vectors: keyboard buffer insertion ...
 IRQ1V = &0204               \ ... and the interrupt
 REMV = &022C                \ buffer remove, vector 22: foreground code polls it while it waits for a key
@@ -74,12 +80,23 @@ GUARD &C000
                 equs "(C)2026 Pi1MHz"
                 equb 0
 
-\ A is the reason code, X this ROM's slot, Y the reason argument.  Anything but
-\ reset is passed on with all three untouched.
+\ A is the reason code, X this ROM's slot, Y the reason argument.  Every call is
+\ passed on with all three untouched: none is claimed.
 .service        cmp #9
                 bne notcmd9
                 jmp help                    \ *HELP
-.notcmd9        cmp #1
+.notcmd9        cmp #&0D
+                bne notrfs
+                pha                         \ a ROM filing system operation: tell the Pi, and pass it on
+                tya
+                pha
+                lda #&22
+                jsr marker
+                pla
+                tay
+                pla
+                rts
+.notrfs         cmp #1
                 bne done
                 pha                         \ the MOS wants A, X and Y back
                 txa
@@ -199,6 +216,7 @@ GUARD &C000
                 cpx #0
                 bne remvold
                 bvs remvold
+                jsr rfsdone
                 plp
                 jsr remvcall
                 bcs remvret
@@ -218,6 +236,24 @@ GUARD &C000
                 rts
 .remvold        plp
 .remvcall       jmp (EXTVEC)
+
+\ The ROM filing system takes the 6850 for each operation (&EA = 1, OS 1.2 &FB3D) and
+\ leaves it taken, so nothing reaches RS423 again until another filing system is
+\ selected.  A read of the keyboard is never inside an operation (each one takes it
+\ again), so here it is given back, when the ROM filing system had it (&247 = 2).
+\ The cassette's (&247 = 0) is left alone: a tape may still be running.  A is kept.
+CFSFLAG = &0247             \ 0 the cassette filing system, 2 the ROM one
+ACIAUSE = &EA               \ 1..&7F: the cassette or ROM filing system has the 6850
+.rfsdone        pha
+                lda CFSFLAG
+                beq rfsx
+                lda ACIAUSE
+                beq rfsx
+                bmi rfsx                    \ negative: the RS423 timeout count, the MOS's
+                lda #0
+                sta ACIAUSE
+.rfsx           pla
+                rts
 
 .coltab         equb 80, 40, 20, 80, 40, 20, 40, 40     \ text columns in MODE 0 to 7
 .rowtab         equb 32, 32, 32, 25, 32, 32, 25, 25     \ ... and rows

@@ -74,6 +74,8 @@ static bool            g_utf8 = true;
 static bool            g_copy = true;         /* show the copy cursor */
 static bool            g_repaint;             /* a new terminal is being drawn from the model */
 static bool            g_scan_pending;        /* a new session still has to ask the Beeb for what is on its screen */
+static bool            g_unseen;              /* the ROM filing system printed where RS423 cannot see: a scan, once it stops */
+#define UNSEEN_QUIET_US 100000u
 static bool            g_break_asked;         /* F12 was pressed: the next hook follows a BREAK */
 static char            g_banner[400];   /* what the Beeb printed just after the helper hooked in */
 static unsigned        g_banner_len, g_banner_lines;
@@ -736,6 +738,23 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
    /* A terminal that has just come is shown what is on the Beeb's screen: the ROM reads it and
       sends it (silently), and the terminal is cleared and drawn from that.  Once the greeting
       and the model's own picture are out. */
+   /* The same after a ROM filing system operation, which printed to the Beeb's screen only
+      (see serial_redirect_unseen_gen).  The ROM reports it on every ROM it pages, so the
+      scan is asked for once the reports have stopped for UNSEEN_QUIET_US; it runs when the
+      Beeb next reads the keyboard, after the operation. */
+   {
+      static uint32_t unseen_seen;
+      static uint32_t unseen_us;
+      uint32_t        gen = serial_redirect_unseen_gen();
+      if (gen != unseen_seen) {
+         unseen_seen = gen;
+         unseen_us = now_us;
+         g_unseen = true;
+      } else if (g_unseen && (now_us - unseen_us) >= UNSEEN_QUIET_US) {
+         g_unseen = false;
+         g_scan_pending = true;
+      }
+   }
    if (g_scan_pending && g_stage == S_LIVE && !g_repaint && g_pcb != NULL && beeb_attached
        && serial_redirect_scan_ok() && g_khead == g_ktail) {
       g_scan_pending = false;
