@@ -1,0 +1,163 @@
+/* telnetd_proto.h - the byte-level protocol of the Pi1MHz telnet daemon.
+ *
+ * Two pure, stateful translators with no I/O, so telnetd.c (lwIP) and the host
+ * tests (src/tests/telnetd) drive them with byte vectors:
+ *
+ *   tnd_in_*   what the telnet client sends -> what the Beeb's keyboard gets
+ *   tnd_out_*  what the Beeb prints (its VDU byte stream) -> what a terminal
+ *              understands (ANSI)
+ *
+ * The daemon is a character-at-a-time server: it offers WILL ECHO and WILL SGA
+ * (the Beeb does the echoing, the client must not) and the keys go to the Beeb
+ * as they are typed.
+ */
+#ifndef TELNETD_PROTO_H
+#define TELNETD_PROTO_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/* ---- client -> Beeb ---------------------------------------------------- */
+
+#define TND_IN_KEYS    2u      /* most keys one input byte can release        */
+
+/* Not a key but a request: the client pressed ESC (a lone ESC, once it is clear
+   no sequence follows) or Ctrl-C.  The Beeb's ESCAPE is a condition the keyboard
+   scan raises, not a character in the buffer, so it cannot travel as a key: the
+   daemon passes it to serial_redirect_escape().  0 is free for it because NUL is
+   never a key. */
+#define TND_KEY_ESCAPE 0u
+
+/* Also a request and not a key: F12 is BREAK.  The daemon passes it to serial_redirect_break().
+   254 is never a Beeb key the translator makes. */
+#define TND_KEY_BREAK  0xFEu
+
+/* F11: draw the screen again.  The daemon types *TELNETD for the Beeb, and the auto-start
+   ROM answers by sending what is on the screen. */
+#define TND_KEY_REFRESH 0xFDu
+#define TND_IN_REPLY   3u      /* most negotiation bytes one input byte needs */
+#define TND_GREETING_LEN 9u
+
+/* A lone ESC is only a key once nothing follows it for this long; if more
+   arrives first it was the start of a cursor or function key. */
+#define TND_ESC_US     100000u
+
+typedef struct {
+   uint8_t  state;
+   uint8_t  cmd;                /* WILL/WONT/DO/DONT being parsed        */
+   uint8_t  nparam;
+   uint16_t param[3];
+   uint32_t esc_us;             /* when the ESC that opened the sequence arrived */
+   uint8_t  seen_will[32];      /* respond-once bitmaps, over 256 options */
+   uint8_t  seen_do[32];
+} tnd_in_t;
+
+void   tnd_in_reset(tnd_in_t *s);
+
+/* The server's opening offer: IAC WILL ECHO, IAC WILL SGA, IAC DO SGA.
+   Writes TND_GREETING_LEN bytes. */
+size_t tnd_greeting(uint8_t *out);
+
+/* Feed one byte from the client.  Returns how many Beeb keys it released
+   (0 to TND_IN_KEYS, written to keys[]); *replen is how many bytes of telnet
+   negotiation (rep[], at most TND_IN_REPLY) go back to the client. */
+size_t tnd_in_byte(tnd_in_t *s, uint8_t c, uint32_t now_us,
+                   uint8_t keys[TND_IN_KEYS], uint8_t rep[TND_IN_REPLY],
+                   size_t *replen);
+
+/* Call regularly: releases a lone ESC once it has waited TND_ESC_US, and drops
+   an escape sequence that never finished.  Returns keys released (0 or 1). */
+size_t tnd_in_tick(tnd_in_t *s, uint32_t now_us, uint8_t keys[TND_IN_KEYS]);
+
+/* The key codes the translator produces, as the MOS keyboard buffer holds them
+   (what OSBYTE 138 / INSV into buffer 0 takes): cursor left/right/down/up are
+   140/141/142/143 and COPY is 139 (GET returns 136-139 and 135 under *FX4,1:
+   the MOS subtracts 4), DELETE is 127, f0-f9 are 128-137, the pound sign is 96.
+   ESC and Ctrl-C are TND_KEY_ESCAPE. */
+
+/* ---- Beeb -> terminal ---------------------------------------------------- */
+
+#define TND_OUT_MAX    48u     /* most bytes one VDU byte can expand to */
+#define TND_COPY_MAX   96u     /* most bytes tnd_out_copyflush writes */
+#define TND_REPAINT_MAX 400u   /* most bytes tnd_out_repaint writes */
+#define TND_COLS_MAX   80u
+#define TND_ROWS_MAX   32u
+
+typedef struct {
+   uint8_t code;                /* the VDU code whose parameters are being collected, 0 = none */
+   uint8_t got;                 /* parameters collected so far */
+   uint8_t p[4];                /* the ones the translator uses */
+   bool    disabled;            /* VDU 21 seen: everything is ignored until VDU 6 */
+   bool    coloured;            /* a colour was set: reset it at the end of the line */
+   bool    utf8;                /* the pound sign as UTF-8 (else Latin-1) */
+
+   /* a model of the Beeb's text screen: see telnetd_proto.c */
+   bool     sync;               /* the cursor position is known (a CLS, MODE, TAB ... was seen) */
+   bool     tele;               /* MODE 7 */
+   bool     origin_ok;          /* the terminal's row 0 is the Beeb's: absolute positions can be sent */
+   bool     colok;              /* the column of the cursor is known, so a line can be wrapped by hand */
+   bool     curoff;             /* the Beeb's cursor is off (VDU 23,1,0) */
+   uint8_t  mode, cols, rows;
+   uint8_t  wl, wb, wr, wt;     /* the text window: left, bottom, right, top */
+   uint8_t  cx, cy;             /* where the next character goes */
+   uint8_t  fg, bg;             /* the colours set: logical colour numbers */
+   uint8_t  ncol;               /* how many logical colours the mode has: 2, 4, 8 or 16 */
+   uint8_t  pal[16];            /* the physical colour (0-7) each logical colour shows as */
+   bool     cc_on, hl_on;       /* the copy cursor is active; its mark is on the terminal */
+   uint8_t  ccx, ccy, hlx, hly;
+   uint8_t  pend[8];            /* cursor keys waiting for the Beeb to be quiet */
+   uint8_t  npend;
+   uint32_t last_us;            /* when the Beeb last printed something */
+   uint8_t  ch[TND_ROWS_MAX][TND_COLS_MAX];   /* what is on each cell */
+   uint8_t  at[TND_ROWS_MAX][TND_COLS_MAX];   /* and its colours; bit 7: seen, bit 6: no colour set */
+} tnd_out_t;
+
+void   tnd_out_reset(tnd_out_t *s, bool utf8);
+
+/* The screen size the model assumes until the Beeb sends a MODE (the daemon's
+   telnetd_mode setting): the Beeb's mode at the start cannot be read.  Nothing
+   on the screen is known and the cursor position is not (until a CLS, MODE,
+   TAB ...).  tnd_out_set_mode is the Beeb's own MODE: a cleared screen. */
+void   tnd_out_assume_mode(tnd_out_t *s, uint8_t mode);
+
+/* The Beeb's cursor is known (helper 20 read it from the MOS): the model can
+   follow from there, though what is on the screen is not known. */
+void   tnd_out_at(tnd_out_t *s, uint8_t x, uint8_t y);
+
+/* Feed one byte of the Beeb's output; writes the terminal's bytes to dst
+   (TND_OUT_MAX at most) and returns how many.  Parameter bytes of VDU codes
+   are consumed here, so nothing a terminal would print as junk gets through.
+   0xFF never appears in the output, so no IAC escaping is needed. */
+size_t tnd_out_byte(tnd_out_t *s, uint8_t c, uint8_t dst[TND_OUT_MAX]);
+
+/* A new terminal is connected to a model that has been following the Beeb all
+   along: forget what belonged to the last one.  tnd_out_repaint then draws the
+   model's screen on it, a row at a time, from the first row that has anything on
+   it, as plain lines under whatever the terminal already shows (no clear; one
+   row past the last puts the cursor and colours right).  It returns the bytes for
+   that row, 0 for a row it does not draw.  The terminal's rows are then no longer
+   the Beeb's, so tnd_out_origin_lost: until the Beeb next clears the screen the
+   translator sends only relative moves, and clears once before an absolute one. */
+void   tnd_out_session(tnd_out_t *s);
+void   tnd_out_origin_lost(tnd_out_t *s);
+
+/* Is a row of the screen exactly this text (and blanks after it)? */
+bool   tnd_out_has_line(const tnd_out_t *s, const char *text, size_t len);
+bool   tnd_out_blank(const tnd_out_t *s);   /* the model knows of no character on the screen */
+size_t tnd_out_colours(const tnd_out_t *s, uint8_t dst[16]);
+size_t tnd_out_repaint(const tnd_out_t *s, unsigned row, uint8_t dst[TND_REPAINT_MAX]);
+
+void   tnd_out_touch(tnd_out_t *s, uint32_t now_us);
+void   tnd_out_copykey(tnd_out_t *s, uint8_t key);
+size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX]);
+
+/* ---- a session that has stopped moving -------------------------------------- */
+
+/* True when something is waiting on the client (`pending`: bytes sent and not yet
+   acknowledged, or keys refused for lack of room) and nothing has moved for
+   limit_us.  An idle but healthy session has nothing pending, so is never stalled.
+   The clock is the 32-bit microsecond counter, so it may wrap. */
+bool tnd_stalled(bool pending, uint32_t now_us, uint32_t progress_us, uint32_t limit_us);
+
+#endif /* TELNETD_PROTO_H */
