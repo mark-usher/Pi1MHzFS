@@ -39,12 +39,14 @@
 \ Build: beeb/telnetd-rom/build.sh (needs beebasm).
 
 OSBYTE = &FFF4
+OSNEWL = &FFE7
+CMDTAIL = &F2               \ service call 9: the *HELP line, Y its offset
 OSWRCH = &FFEE
 CMDPTR = &F2                \ service call 4: the command line, and Y its offset
 HELPER_ENTRY = &FC88        \ the helper window: STX &FC88 / NOP / JMP &FD00
 HELPER_OPCODE = &8E         \ the Pi writes STX abs here, so it is there only if a Pi1MHz answers
 TELNET_HELPER = 20
-BUILD = 1                   \ the build number in the version string, so *HELP says which image is fitted
+BUILD = 3                   \ the build number in the version string, so *HELP says which image is fitted
 INSV = &022A                \ the MOS vectors: keyboard buffer insertion ...
 IRQ1V = &0204               \ ... and the interrupt
 REMV = &022C                \ buffer remove, vector 22: foreground code polls it while it waits for a key
@@ -74,7 +76,10 @@ GUARD &C000
 
 \ A is the reason code, X this ROM's slot, Y the reason argument.  Anything but
 \ reset is passed on with all three untouched.
-.service        cmp #1
+.service        cmp #9
+                bne notcmd9
+                jmp help                    \ *HELP
+.notcmd9        cmp #1
                 bne done
                 pha                         \ the MOS wants A, X and Y back
                 txa
@@ -219,15 +224,34 @@ GUARD &C000
 
 \ Send the screen to the Pi.  The Pi gets the characters only, as VDU 31,x,y,char with
 \ the VDU drivers off (OSBYTE 3, X=3); the Beeb's cursor is moved on the screen to read
-\ each cell, and put back.  Nothing is kept in zero page, which the MOS's OSBYTE and VDU
-\ routines use: the counters live on the stack, below the return address, from the top:
+\ each cell, and put back.  A text window would keep the cursor inside it (VDU 31 is
+\ relative to it and ignores a cell outside it), so for the scan the window is opened
+\ to the whole screen in the MOS's VDU variables (&300+8 to &300+11, which OSBYTE 160
+\ reads), and put back afterwards; the Pi is sent VDU 26 before and VDU 28 with the
+\ window after, so its own picture has the same window.  Nothing is kept in zero page,
+\ which the MOS's OSBYTE and VDU routines use: the counters live on the stack, below
+\ the return address, from the top:
 \   &101,x column  &102,x row  &103,x the output streams as they were
 \   &104,x cursor column  &105,x cursor row  &106,x columns  &107,x rows
+\   &108,x window top  &109,x right  &10A,x bottom  &10B,x left
+VDUVARS = &0300
 .scan           lda INSV+1                  \ the Pi is hooked in when the keyboard vector is its stub
                 cmp #STUBPAGE
                 beq scango
                 rts
-.scango         lda #135                    \ Y = the mode
+.scango         ldx #8                      \ the text window: left, bottom, right, top
+                jsr rdvdu
+                pha
+                ldx #9
+                jsr rdvdu
+                pha
+                ldx #10
+                jsr rdvdu
+                pha
+                ldx #11
+                jsr rdvdu
+                pha
+                lda #135                    \ Y = the mode
                 jsr OSBYTE
                 tya
                 and #7
@@ -236,12 +260,24 @@ GUARD &C000
                 pha                         \ rows
                 lda coltab,x
                 pha                         \ columns
-                lda #134                    \ the cursor, to put back
+                lda #134                    \ the cursor (in the window), to put back
                 jsr OSBYTE
                 tya
                 pha                         \ cursor row
                 txa
                 pha                         \ cursor column
+                tsx                         \ the window opened to the whole screen
+                lda &103,x
+                sec
+                sbc #1
+                sta VDUVARS+10              \ right = columns - 1
+                lda &104,x
+                sec
+                sbc #1
+                sta VDUVARS+9               \ bottom = rows - 1
+                lda #0
+                sta VDUVARS+8
+                sta VDUVARS+11
                 lda #3                      \ the screen only, and what it was
                 ldx #0
                 jsr OSBYTE
@@ -251,7 +287,9 @@ GUARD &C000
                 pha                         \ row
                 pha                         \ column
                 jsr topi
-                lda #12                     \ the Pi starts from a clear screen
+                lda #26                     \ the Pi: no window, and a clear screen
+                jsr OSWRCH
+                lda #12
                 jsr OSWRCH
                 jsr toscr
 .scancol        tsx
@@ -284,12 +322,30 @@ GUARD &C000
                 lda &102,x
                 cmp &107,x
                 bne scancol
-                tsx                         \ the cursor back, on the screen and for the Pi
-                lda &104,x
+                tsx                         \ the window back on the Beeb ...
+                lda &10B,x
+                sta VDUVARS+8
+                lda &10A,x
+                sta VDUVARS+9
+                lda &109,x
+                sta VDUVARS+10
+                lda &108,x
+                sta VDUVARS+11
+                lda &104,x                  \ ... and its cursor
                 ldy &105,x
                 jsr locate
-                jsr topi
+                jsr topi                    \ the Pi: the same window and cursor
+                lda #28
+                jsr OSWRCH
                 tsx
+                lda &10B,x
+                jsr OSWRCH
+                lda &10A,x
+                jsr OSWRCH
+                lda &109,x
+                jsr OSWRCH
+                lda &108,x
+                jsr OSWRCH
                 lda &104,x
                 ldy &105,x
                 jsr locate
@@ -298,13 +354,15 @@ GUARD &C000
                 tax
                 lda #3
                 jsr OSBYTE                  \ the streams as they were
-                pla
-                pla
-                pla
-                pla
-                pla
-                pla
-                pla
+                ldx #11
+.scandrop       pla
+                dex
+                bne scandrop
+                rts
+
+.rdvdu          lda #160                    \ OSBYTE 160: A = VDU variable X
+                jsr OSBYTE
+                txa
                 rts
 
 .locate         pha                         \ VDU 31,A,Y (OSWRCH keeps Y)
@@ -320,6 +378,34 @@ GUARD &C000
 .toscr          lda #3                      \ output to the screen only
                 ldx #0
                 jmp OSBYTE
+
+\ *HELP with nothing after it: the title, version and build, so it is easy to see which
+\ image is fitted.  *HELP with a topic says nothing.  Not claimed either way: every ROM
+\ answers *HELP, and A, X and Y go back as they came.
+.help           pha
+                txa
+                pha
+                tya
+                pha
+                lda (CMDTAIL),y
+                cmp #13
+                bne helpx
+                jsr OSNEWL
+                ldx #0
+.helplp         lda romtitle,x
+                bne helpch
+                lda #' '                    \ the 0 between the title and the version
+.helpch         jsr OSWRCH
+                inx
+                cpx #(copyright - romtitle)
+                bne helplp
+                jsr OSNEWL
+.helpx          pla
+                tay
+                pla
+                tax
+                pla
+                rts
 
 .romend
 

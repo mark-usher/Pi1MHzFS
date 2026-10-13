@@ -148,6 +148,8 @@ static void o_str(const char *s)
 
 static void k_push(uint8_t k)
 {
+   if (k != SCAN_KEY)
+      g_banner_until = Pi1MHz_now_us;              /* somebody is typing: the start-up is over */
    if (g_ktail - g_khead < KRING_SIZE) {
       g_kring[g_ktail & KRING_MASK] = k;
       g_ktail++;
@@ -349,6 +351,10 @@ static void banner_byte(uint8_t c)
    }
    if (!g_banner_blk && (int32_t)(Pi1MHz_now_us - g_banner_until) >= 0)
       return;
+   if (!g_banner_blk && g_bline_len == 0u && c == '>') {
+      g_banner_until = Pi1MHz_now_us;              /* the language's prompt: the start-up is over */
+      return;
+   }
    if (c == 10u || c == 13u) {
       if (c == 10u)
          banner_end_line(g_banner_blk);

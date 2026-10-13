@@ -118,11 +118,12 @@ def call(rom, a, x, y, pi_after=0, reset_type=2, pokes=None, watch=()):
 
 
 OSWRCH = 0xFFEE
+OSNEWL = 0xFFE7
 COLS = (80, 40, 20, 80, 40, 20, 40, 40)
 ROWS = (32, 32, 32, 25, 32, 32, 25, 25)
 
 
-def run_command(rom, line, mode=1, screen=None, cur=(3, 4), hooked=True, stream0=1, slot=6, y0=0):
+def run_command(rom, line, mode=1, screen=None, cur=(3, 4), hooked=True, stream0=1, slot=6, y0=0, reason=4):
     """Run service call 4 with a command line, against a model of the MOS: OSBYTE 135 (the
     character at the text cursor, Y the mode), 134 (the cursor), 3 (the output streams) and
     OSWRCH (VDU 31 moves the cursor on the screen; what is sent while bit 0 of the stream is
@@ -141,12 +142,12 @@ def run_command(rom, line, mode=1, screen=None, cur=(3, 4), hooked=True, stream0
         mem._subject[HELPER + i] = b
     helper = []
     mem.subscribe_to_write([HELPER], lambda addr, value: (helper.append(value), 0x8E)[1])
-    for addr in (OSBYTE, OSWRCH, RETURN_TRAP):
+    for addr in (OSBYTE, OSWRCH, OSNEWL, RETURN_TRAP):
         mem._subject[addr] = 0x60
     mem._subject[RETURN_TRAP] = 0xEA
-    st = {"stream": stream0, "cx": cur[0], "cy": cur[1], "args": [], "pi": [], "streams": [], "calls": 0}
+    st = {"stream": stream0, "cx": cur[0], "cy": cur[1], "args": [], "pi": [], "streams": [], "calls": 0, "printed": []}
     mpu = MPU(memory=mem, pc=SERVICE)
-    mpu.a, mpu.x, mpu.y = 4, slot, y0
+    mpu.a, mpu.x, mpu.y = reason, slot, y0
     mpu.sp = 0xF0
     ret = RETURN_TRAP - 1
     mem._subject[0x100 + mpu.sp] = ret >> 8
@@ -169,8 +170,11 @@ def run_command(rom, line, mode=1, screen=None, cur=(3, 4), hooked=True, stream0
                 st["stream"] = mpu.x
                 st["streams"].append(mpu.x)
                 mpu.x = old
+        elif mpu.pc == OSNEWL:
+            st["printed"] += [10, 13]
         elif mpu.pc == OSWRCH:
             c = mpu.a
+            st["printed"].append(c)
             if st["stream"] & 1:
                 st["pi"].append(c)
             if not st["stream"] & 2:                     # the screen drivers are on
@@ -190,7 +194,7 @@ def run_command(rom, line, mode=1, screen=None, cur=(3, 4), hooked=True, stream0
     return st
 
 
-def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a=0x5A, mode=1):
+def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a=0x5A, mode=1, win=None):
     """Call the REMV handler the way the MOS's extended vector entry does, with the MOS's own
     routine modelled by a stub that returns Y=old_y and C=old_c.  Returns what happened."""
     boot = call(rom, 1, 6, 0, pi_after=0, reset_type=2)
@@ -209,7 +213,11 @@ def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a
     for addr in (OSBYTE, OSWRCH, RETURN_TRAP):
         mem._subject[addr] = 0x60
     mem._subject[RETURN_TRAP] = 0xEA
-    st = {"stream": 1, "cx": cur[0], "cy": cur[1], "args": [], "pi": [], "calls": 0}
+    wl, wb, wr, wt = win if win else (0, ROWS[mode] - 1, COLS[mode] - 1, 0)
+    for i, v8 in enumerate((wl, wb, wr, wt)):
+        mem._subject[0x308 + i] = v8                    # the MOS's VDU variables 8-11: the text window
+    # cur is relative to the window, as OSBYTE 134 gives it; the model keeps it absolute
+    st = {"stream": 1, "cx": wl + cur[0], "cy": wt + cur[1], "args": [], "pi": [], "calls": 0}
     mpu = MPU(memory=mem, pc=handler)
     mpu.a, mpu.x, mpu.y = a, x, 7
     mpu.p = (mpu.p & ~0x41) | (0x40 if v else 0) | (1 if c else 0)
@@ -228,7 +236,9 @@ def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a
                 mpu.x = screen.get((st["cx"], st["cy"]), 32)
                 mpu.y = mode
             elif mpu.a == 134:
-                mpu.x, mpu.y = st["cx"], st["cy"]
+                mpu.x, mpu.y = st["cx"] - mem._subject[0x308], st["cy"] - mem._subject[0x30B]
+            elif mpu.a == 160:
+                mpu.x, mpu.y = mem._subject[0x300 + mpu.x], 0
             elif mpu.a == 3:
                 old_stream = st["stream"]
                 st["stream"] = mpu.x
@@ -240,13 +250,17 @@ def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a
                 if st["args"]:
                     st["args"].append(mpu.a)
                     if len(st["args"]) == 3:
-                        st["cx"], st["cy"] = st["args"][1], st["args"][2]
+                        l, bt, r, t = (mem._subject[0x308 + i] for i in range(4))
+                        ax, ay = l + st["args"][1], t + st["args"][2]
+                        if ax <= r and ay <= bt:                # outside the window: ignored, as the MOS does
+                            st["cx"], st["cy"] = ax, ay
                         st["args"] = []
                 elif mpu.a == 31:
                     st["args"] = [31]
         mpu.step()
     else:
         raise RuntimeError("the handler did not return")
+    st["win_after"] = tuple(mem._subject[0x308 + i] for i in range(4))
     st.update(a=mpu.a, x=mpu.x, y=mpu.y, c=mpu.p & 1, v=(mpu.p >> 6) & 1, sp_after=mpu.sp, sp_before=sp_before,
               old_calls=mem._subject[0x310])
     return st
@@ -344,17 +358,33 @@ def main(path):
         cols, rows = COLS[mode], ROWS[mode]
         s2 = {k: v for k, v in scr.items() if k[0] < cols and k[1] < rows}
         r = run_remv(rom, 0, 0, 0, 0xFF, 0, screen=s2, cur=(1, 2), mode=mode)
-        expect = [12]
+        expect = [26, 12]
         for y in range(rows):
             for x in range(cols):
                 ch = s2.get((x, y), 32)
                 if ch not in (0, 32):
                     expect += [31, x, y, ch]
-        expect += [31, 1, 2]
-        check(r["pi"] == expect, f"mode {mode}: the Pi gets CLS, VDU 31,x,y,char for each character, then the cursor (got {len(r['pi'])} bytes, expected {len(expect)})")
+        expect += [28, 0, rows - 1, cols - 1, 0, 31, 1, 2]
+        check(r["pi"] == expect, f"mode {mode}: the Pi gets VDU 26 and CLS, VDU 31,x,y,char for each character, then the window and the cursor (got {len(r['pi'])} bytes, expected {len(expect)})")
         check((r["cx"], r["cy"]) == (1, 2), f"mode {mode}: the cursor is back where it was on the screen")
         check(r["stream"] == 1, f"mode {mode}: the output streams are put back (stream {r['stream']})")
         check(r["c"] == 1 and r["a"] == 0x5A and r["x"] == 0 and r["sp_after"] == r["sp_before"], f"mode {mode}: reported empty, A and X and the stack come back")
+
+    # 5b. with a text window set: cells outside it are read too, and the window comes back
+    scr = {(0, 0): 0x41, (39, 31): 0x42, (6, 9): 0x43}
+    r = run_remv(rom, 0, 0, 0, 0xFF, 0, screen=scr, cur=(2, 3), mode=1, win=(5, 20, 30, 8))
+    expect = [26, 12, 31, 0, 0, 0x41, 31, 6, 9, 0x43, 31, 39, 31, 0x42, 28, 5, 20, 30, 8, 31, 2, 3]
+    check(r["pi"] == expect, f"a text window: every cell is read, then the Pi gets the window and the cursor in it (got {r['pi']})")
+    check(r["win_after"] == (5, 20, 30, 8), f"... and the Beeb's window is put back: {r['win_after']}")
+    check((r["cx"], r["cy"]) == (5 + 2, 8 + 3), f"... with its cursor where it was: {(r['cx'], r['cy'])}")
+
+    # 5c. *HELP: the title, version and build on a plain *HELP; nothing for a topic; never claimed
+    r = run_command(rom, "", reason=9, slot=6, y0=0)
+    text = bytes(r["printed"]).decode("latin-1")
+    check(re.search(r"TelnetD \d+\.\d+ b\d+", text) is not None, f"*HELP prints the title, version and build: {text!r}")
+    check(r["regs"] == (9, 6, 0) and r["sp_after"] == r["sp_before"], f"*HELP is passed on with A, X, Y and the stack as they came: {r['regs']}")
+    r = run_command(rom, "ADFS", reason=9, slot=6, y0=0)
+    check(r["printed"] == [] and r["regs"] == (9, 6, 0), "*HELP ADFS: nothing printed, passed on")
 
     # 6. the REMV handler: a byte from the keyboard buffer passes through untouched, except the
     # one the Pi uses to ask for the screen, which is swallowed (nothing for the program) and
@@ -369,7 +399,7 @@ def main(path):
     check(r["y"] == 0xFE and r["c"] == 0 and r["pi"] == [], "&FE is a key like any other")
     r = run_remv(rom, 0, 0, 0, 0xFF, 0, screen=scr, cur=(3, 1))
     check(r["c"] == 1 and r["a"] == 0x5A and r["x"] == 0, f"the request is swallowed: the buffer is reported empty, A and X kept (C={r['c']})")
-    check(r["pi"][:1] == [12] and 31 in r["pi"] and 0x41 in r["pi"] and 0x42 in r["pi"] and r["pi"][-3:] == [31, 3, 1],
+    check(r["pi"][:2] == [26, 12] and 31 in r["pi"] and 0x41 in r["pi"] and 0x42 in r["pi"] and r["pi"][-3:] == [31, 3, 1],
           f"... and the screen is sent: CLS, the characters, the cursor back ({len(r['pi'])} bytes)")
     check(r["stream"] == 1 and (r["cx"], r["cy"]) == (3, 1) and r["sp_after"] == r["sp_before"], "... with the output streams and the cursor as they were, and the stack balanced")
     r = run_remv(rom, 0, 1, 0, 0xFF, 0, screen=scr)
