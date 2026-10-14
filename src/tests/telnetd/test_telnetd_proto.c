@@ -307,7 +307,7 @@ static void test_input_robustness(void)
 
 /* ---- Beeb -> terminal ---------------------------------------------------- */
 
-static char outbuf[256];
+static char outbuf[8192];
 static const char *render(const void *data, size_t len, bool utf8, tnd_out_t *keep)
 {
    tnd_out_t local;
@@ -516,9 +516,9 @@ static void test_model_wrap_scroll(void)
    /* Teletext starts each row white. */
    tnd_out_reset(&s, true);
    FEED_OUT(&s, "\x16\x07\x1f\x00\x00\x81" "R\x1f\x00\x01" "W", out);
-   CHECK(strstr(out, "\x1b[31m") != NULL && strstr(out, "\x1b[0m\x1b[2;1HW") != NULL,
+   CHECK(strstr(out, "\x1b[0;31mR") != NULL && strstr(out, "\x1b[2;1H\x1b[0mW") != NULL,
          "a colour does not carry to the next row in MODE 7");
-   if (strstr(out, "\x1b[0m\x1b[2;1HW") == NULL) printf("    got [%s]\n", out);
+   if (strstr(out, "\x1b[2;1H\x1b[0mW") == NULL) printf("    got [%s]\n", out);
 }
 
 static void test_copy_cursor(void)
@@ -595,7 +595,7 @@ static void test_repaint(void)
    size_t n;
 
    tnd_out_reset(&s, true);
-   FEED_OUT(&s, "\x0c" "HI\r\n\x11\x01YO", out);          /* CLS, HI, a new line, then YO in red */
+   FEED_OUT(&s, "\x16\x01" "HI\r\n\x11\x01YO", out);      /* MODE 1, HI, a new line, then YO in red */
    n = tnd_out_repaint(&s, 0u, d);
    d[n] = 0;
    CHECK(strcmp((char *)d, "\x1b[0mHI\x1b[0m\r\n") == 0, "repaint draws row 0 as a plain line, with no clear and no positioning"); if (strcmp((char *)d, "\x1b[0mHI\x1b[0m\r\n")) printf("    got [%s]\n", d);
@@ -687,7 +687,7 @@ static void test_repaint(void)
    CHECK(strstr(out, "\x1b[47mz") != NULL, "... and 129 is a white background");
    tnd_out_reset(&s, true);
    FEED_OUT(&s, "\x16\x07\x11\x03x", out);
-   CHECK(strstr(out, "\x1b[33mx") != NULL, "MODE 7: the numbers are the colours");
+   CHECK(strstr(out, "\x1b[33m") == NULL && out[strlen(out) - 1] == 'x', "MODE 7: COLOUR does nothing, as on the Beeb"); if (strstr(out, "\x1b[33m")) printf("    got [%s]\n", out);
 
    /* The Beeb's cursor read from the MOS: followed from there, but nothing is known to be on the screen. */
    tnd_out_reset(&s, true);
@@ -710,6 +710,173 @@ static void test_output_vdu21(void)
    CHECK(strcmp(r, "ab") == 0, "VDU 21 hides everything, including codes, until VDU 6"); if (strcmp(r, "ab")) printf("    got [%s]\n", r);
    r = render("c", 1, true, &s);
    CHECK(strcmp(r, "c") == 0, "and output resumes");
+}
+
+/* MODE 7 once the cursor is known: every cell drawn as the SAA5050 draws it. */
+static void ttx_feed(tnd_out_t *s, bool utf8, const char *data, size_t len, char *out, size_t cap)
+{
+   tnd_out_reset(s, utf8);
+   feed_out(s, "\x16\x07", 2, out, cap);
+   feed_out(s, data, len, out, cap);
+}
+#define TTX(lit) ttx_feed(&s, true, lit, sizeof(lit) - 1, out, sizeof out)
+#define TTX_ASCII(lit) ttx_feed(&s, false, lit, sizeof(lit) - 1, out, sizeof out)
+
+static void test_output_teletext_chip(void)
+{
+   tnd_out_t s;
+   char out[4096];
+   uint8_t d[TND_REPAINT_MAX];
+   size_t n;
+
+   TTX("\x97\xff");
+   CHECK(strstr(out, "\xe2\x96\x88") != NULL, "MODE 7 graphics: &FF (all six cells) is a full block"); if (!strstr(out, "\xe2\x96\x88")) printf("    got [%s]\n", out);
+   TTX("\x94" "5");
+   CHECK(strstr(out, "\x1b[0;34m\xe2\x96\x8c") != NULL, "graphics blue '5' (the left column) is a blue left half block"); if (!strstr(out, "\x1b[0;34m\xe2\x96\x8c")) printf("    got [%s]\n", out);
+   TTX("\x97" "j");
+   CHECK(strstr(out, "\xe2\x96\x90") != NULL, "'j' (the right column) is the right half block");
+   TTX("\x97!");
+   CHECK(strstr(out, "\xf0\x9f\xac\x80") != NULL, "'!' (the top left cell) is the first sextant, U+1FB00"); if (!strstr(out, "\xf0\x9f\xac\x80")) printf("    got [%s]\n", out);
+   TTX("\x97" "A");
+   CHECK(out[strlen(out) - 1] == 'A', "capitals blast through in graphics");
+
+   TTX("`#_{}~[]^\\|");
+   CHECK(strstr(out, "\xc2\xa3#\xe2\x80\x95\xc2\xbc\xc2\xbe\xc3\xb7\xe2\x86\x90\xe2\x86\x92\xe2\x86\x91\xc2\xbd\xe2\x80\x96") != NULL,
+         "the SAA5050's own characters: pound # dash 1/4 3/4 divide left right up 1/2 double bar"); if (!strstr(out, "\xc2\xa3#")) printf("    got [%s]\n", out);
+
+   TTX("\x81\x9d\x87X");
+   CHECK(strstr(out, "\x1b[0;37;41m") != NULL && out[strlen(out) - 1] == 'X', "new background: white X on red (the row after the code is red)"); if (!strstr(out, "\x1b[0;37;41m")) printf("    got [%s]\n", out);
+   TTX("\x88X");
+   CHECK(strstr(out, "\x1b[0;37;5mX") != NULL, "flash is the terminal's blink"); if (!strstr(out, "\x1b[0;37;5mX")) printf("    got [%s]\n", out);
+   TTX("\x98X");
+   CHECK(strchr(out, 'X') == NULL, "conceal hides the text");
+
+   TTX(" ABC\x1f\x00\x00\x82");
+   CHECK(strstr(out, "\x1b[0;32mABC") != NULL, "a colour code put in front of text colours the text after it"); if (!strstr(out, "\x1b[0;32mABC")) printf("    got [%s]\n", out);
+   CHECK(strstr(out, "\x1b[2G") != NULL, "... and the cursor goes back to the cell after the code");
+
+   TTX("\x97\x9e\xff\x93X");
+   {
+      unsigned blocks = 0;
+      for (const char *p = out; (p = strstr(p, "\xe2\x96\x88")) != NULL; p += 3)
+         blocks++;
+      CHECK(blocks == 2, "hold graphics: the control code after a mosaic shows the mosaic again (%u blocks)", blocks);
+   }
+
+   TTX("\x8d" "AB\r\n\x8d" "AB");
+   CHECK(strstr(out, "\x1b[1;1H\x1b#3") != NULL && strstr(out, "\x1b[2;1H\x1b#4") != NULL,
+         "double height: the first row is the top half, the next the bottom"); if (!strstr(out, "\x1b#4")) printf("    got [%s]\n", out);
+   feed_out(&s, "\x0c", 1, out, sizeof out);
+   CHECK(strstr(out, "\x1b#5") != NULL && strstr(out, "\x1b[2J") != NULL, "a CLS puts the rows back to single height");
+   TTX("\x8d" "AB\x1f\x00\x00 ");
+   CHECK(strstr(out, "\x1b#5") != NULL, "a double height code overwritten: the row goes back to single height"); if (!strstr(out, "\x1b#5")) printf("    got [%s]\n", out);
+
+   TTX("AB\x7f");
+   CHECK(strstr(out, "\b \x1b[2G") != NULL, "DELETE draws the cell as a space and the cursor stays on it"); if (!strstr(out, "\b \x1b[2G")) printf("    got [%s]\n", out);
+
+   TTX("\x81R\x8dZ");
+   n = tnd_out_repaint(&s, 0u, d);
+   d[n] = 0;
+   CHECK(strstr((char *)d, "\x1b#3") != NULL && strstr((char *)d, "\x1b[0;31mR") != NULL,
+         "a repainted MODE 7 row has its line attribute and colours"); if (!strstr((char *)d, "\x1b[0;31mR")) printf("    got [%s]\n", d);
+
+   TTX_ASCII("`");
+   CHECK(strchr(out, '\xa3') != NULL, "no UTF-8: the pound is Latin-1");
+   TTX_ASCII("\x97!");
+   CHECK(out[strlen(out) - 1] == '#', "no UTF-8: a mosaic is a #");
+
+   /* Anything at all, in MODE 7 with the cursor known: the output bound holds. */
+   tnd_out_reset(&s, true);
+   feed_out(&s, "\x16\x07", 2, out, sizeof out);
+   {
+      uint32_t x = 12345u;
+      size_t   worst = 0u;
+      for (unsigned i = 0; i < 200000u; i++) {
+         uint8_t b[TND_OUT_MAX];
+         x = x * 1103515245u + 12345u;
+         uint8_t c = (uint8_t)(x >> 16);
+         if (c == 22u || c == 12u) c = 0x8D;      /* fewer clears: the rows fill up */
+         n = tnd_out_byte(&s, c, b);
+         if (n > worst) worst = n;
+         if (n > TND_OUT_MAX) break;
+         if ((i & 4095u) == 0u) {
+            uint8_t r[TND_REPAINT_MAX];
+            for (unsigned y = 0; y <= s.rows; y++)
+               if (tnd_out_repaint(&s, y, r) > TND_REPAINT_MAX) worst = 99999u;
+         }
+      }
+      CHECK(worst <= TND_OUT_MAX, "MODE 7 noise: no byte's output exceeds TND_OUT_MAX (worst %u)", (unsigned)worst);
+   }
+}
+
+/* Graphics in xterm's Tektronix 4014 window, once the terminal has said it is xterm. */
+static void test_tek(void)
+{
+   tnd_out_t s;
+   char out[4096];
+   tnd_in_t in;
+   uint8_t keys[TND_IN_KEYS], rep[TND_IN_REPLY];
+   size_t replen, nk = 0;
+
+   /* MOVE 0,0 : DRAW 1279,1023 : then text */
+   static const char draw[] = "\x16\x04" "\x19\x04\x00\x00\x00\x00" "\x19\x05\xff\x04\xff\x03" "A";
+   tnd_out_reset(&s, true);
+   feed_out(&s, draw, sizeof draw - 1, out, sizeof out);
+   CHECK(strstr(out, "\x1b[?38h") == NULL && strchr(out, 0x1d) == NULL, "graphics are swallowed when the terminal is not xterm");
+   tnd_out_reset(&s, true);
+   tnd_out_tek(&s, true);
+   feed_out(&s, draw, sizeof draw - 1, out, sizeof out);
+   CHECK(strstr(out, "\x1b[?38h\x1d" "\x20\x60\x20\x40" "\x38\x6b\x3f\x5f") != NULL,
+         "MOVE 0,0 DRAW 1279,1023: the Tek window, one vector corner to corner (0,0 to 1023,779)");
+   if (!strstr(out, "\x1b[?38h\x1d")) printf("    got [%s]\n", out);
+   CHECK(strstr(out, "\x1b\x03" "A") != NULL, "text afterwards goes back to the text screen");
+
+   /* relative moves follow the graphics cursor; the origin applies to absolute ones */
+   static const char rel[] = "\x16\x04" "\x1d\x80\x02\x00\x02" "\x19\x04\x00\x00\x00\x00" "\x19\x01\x00\x00\x80\x00";
+   tnd_out_reset(&s, true);
+   tnd_out_tek(&s, true);
+   feed_out(&s, rel, sizeof rel - 1, out, sizeof out);
+   CHECK(s.gx == 640 && s.gy == 640, "VDU 29 sets the origin, PLOT 1 is relative to the cursor (%d,%d)", s.gx, s.gy);
+
+   /* CLG clears the Tek page; a background-colour draw only moves */
+   tnd_out_reset(&s, true);
+   tnd_out_tek(&s, true);
+   feed_out(&s, "\x10", 1, out, sizeof out);
+   CHECK(strstr(out, "\x1b[?38h\x1b\x0c") != NULL, "CLG clears the Tek page");
+   feed_out(&s, "\x19\x07\x10\x00\x10\x00", 6, out, sizeof out);
+   CHECK(strchr(out, 0x1d) == NULL && s.gx == 16, "PLOT 7 (background) moves without drawing");
+
+   /* a MODE clears it too, and the text screen comes back */
+   feed_out(&s, "\x16\x07", 2, out, sizeof out);
+   CHECK(strstr(out, "\x1b\x0c") != NULL && strstr(out, "\x1b\x03") != NULL && strstr(out, "\x1b[2J") != NULL,
+         "MODE clears the Tek page and goes back to the text screen");
+
+   /* the terminal's answer to CSI > q */
+   tnd_in_reset(&in);
+   {
+      static const char reply[] = "\x1bP>|XTerm(379)\x1b\\x";
+      for (size_t i = 0; i < sizeof reply - 1; i++)
+         nk += tnd_in_byte(&in, (uint8_t)reply[i], 0, keys, rep, &replen);
+   }
+   CHECK(in.xterm && nk == 1 && keys[0] == 'x', "XTVERSION's answer from xterm is taken, not typed, and what follows is a key");
+   tnd_in_reset(&in);
+   {
+      static const char reply[] = "\x1bP>|WezTerm 2024\x1b\\";
+      for (size_t i = 0; i < sizeof reply - 1; i++)
+         tnd_in_byte(&in, (uint8_t)reply[i], 0, keys, rep, &replen);
+   }
+   CHECK(!in.xterm, "another terminal's answer: no Tek");
+   tnd_in_reset(&in);
+   nk = 0;
+   {
+      uint8_t all[8]; size_t na = 0;
+      static const char altp[] = "\x1bPa";
+      for (size_t i = 0; i < sizeof altp - 1; i++) {
+         size_t k = tnd_in_byte(&in, (uint8_t)altp[i], 0, keys, rep, &replen);
+         for (size_t j = 0; j < k && na < sizeof all; j++) all[na++] = keys[j];
+      }
+      CHECK(na == 3 && all[0] == TND_KEY_ESCAPE && all[1] == 'P' && all[2] == 'a', "Alt-P is ESCAPE and P, not a DCS (%u keys)", (unsigned)na);
+   }
 }
 
 static void test_output_teletext(void)
@@ -776,6 +943,8 @@ int main(void)
    test_output_params();
    test_output_vdu21();
    test_output_teletext();
+   test_output_teletext_chip();
+   test_tek();
    test_output_robustness();
    test_model_wrap_scroll();
    test_copy_cursor();

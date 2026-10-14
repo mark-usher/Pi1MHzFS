@@ -33,7 +33,7 @@
 
 /* ---- client -> Beeb ---------------------------------------------------- */
 
-enum { I_NORMAL, I_CR, I_IAC, I_OPT, I_SB, I_SBIAC, I_ESC, I_CSI, I_SS3, I_C2 };
+enum { I_NORMAL, I_CR, I_IAC, I_OPT, I_SB, I_SBIAC, I_ESC, I_CSI, I_SS3, I_C2, I_DCS0, I_DCS, I_DCSESC };
 
 #define ESC_STUCK_US  500000u    /* an escape sequence that never finished */
 
@@ -165,6 +165,15 @@ static uint8_t csi_key(const tnd_in_t *s, uint8_t f)
    return arrow(f);
 }
 
+/* The terminal's name, in its answer to XTVERSION (CSI > q): "|XTerm(379)" from xterm, which has a
+   Tektronix 4014 mode for the Beeb's graphics. */
+static void tnd_in_dcs_done(tnd_in_t *s)
+{
+   static const char xt[] = "|XTerm(";
+   if (s->ndcs >= sizeof xt - 1u && memcmp(s->dcs, xt, sizeof xt - 1u) == 0)
+      s->xterm = true;
+}
+
 size_t tnd_in_byte(tnd_in_t *s, uint8_t c, uint32_t now_us,
                    uint8_t keys[TND_IN_KEYS], uint8_t rep[TND_IN_REPLY],
                    size_t *replen)
@@ -227,6 +236,10 @@ size_t tnd_in_byte(tnd_in_t *s, uint8_t c, uint32_t now_us,
          s->state = I_SS3;
          return 0u;
       }
+      if (c == 'P') {                           /* a DCS: the terminal answering CSI > q, or Alt-P */
+         s->state = I_DCS0;
+         return 0u;
+      }
       /* Not a sequence: the ESC was the ESCAPE key after all, and this byte is a key. */
       keys[0] = TND_KEY_ESCAPE;
       if (c == 27u) {                           /* ... or the start of the next one */
@@ -256,6 +269,41 @@ size_t tnd_in_byte(tnd_in_t *s, uint8_t c, uint32_t now_us,
          }
       }
       return 0u;                                /* a parameter or intermediate byte */
+
+   case I_DCS0:                                 /* only a reply to CSI > q is taken as one: DCS > | ... */
+      if (c == '>') {
+         s->state = I_DCS;
+         s->ndcs = 0u;
+         return 0u;
+      }
+      s->state = I_NORMAL;                      /* ESC P was Alt-P: the ESCAPE key, a P, and this */
+      keys[0] = TND_KEY_ESCAPE;
+      {
+         size_t k = 1u + plain_byte(s, 'P', keys + 1);
+         if (c == 27u) {                         /* ... or the start of the next sequence */
+            s->state = I_ESC;
+            s->esc_us = now_us;
+         } else if (k < TND_IN_KEYS) {
+            k += plain_byte(s, c, keys + k);
+         }
+         return k;
+      }
+
+   case I_DCS:                                  /* up to the string terminator (ESC \, or BEL) */
+      if (c == 27u) {
+         s->state = I_DCSESC;
+      } else if (c == 7u) {
+         s->state = I_NORMAL;
+         tnd_in_dcs_done(s);
+      } else if (s->ndcs < sizeof s->dcs) {
+         s->dcs[s->ndcs++] = c;
+      }
+      return 0u;
+
+   case I_DCSESC:
+      s->state = I_NORMAL;
+      tnd_in_dcs_done(s);
+      return 0u;
 
    case I_SS3:
       s->state = I_NORMAL;
@@ -289,8 +337,14 @@ size_t tnd_in_tick(tnd_in_t *s, uint32_t now_us, uint8_t keys[TND_IN_KEYS])
       keys[0] = TND_KEY_ESCAPE;
       return 1u;
    }
-   if ((s->state == I_CSI || s->state == I_SS3) && (now_us - s->esc_us) >= ESC_STUCK_US)
+   if ((s->state == I_CSI || s->state == I_SS3 || s->state == I_DCS || s->state == I_DCSESC)
+       && (now_us - s->esc_us) >= ESC_STUCK_US)
       s->state = I_NORMAL;
+   if (s->state == I_DCS0 && (now_us - s->esc_us) >= TND_ESC_US) {   /* Alt-P with nothing after it */
+      s->state = I_NORMAL;
+      keys[0] = TND_KEY_ESCAPE;
+      return 1u + plain_byte(s, 'P', keys + 1);
+   }
    return 0u;
 }
 
@@ -317,6 +371,7 @@ static uint8_t vdu_params(uint8_t c)
 }
 
 #define AT_KNOWN 0x80u       /* the model has seen what is in this cell */
+#define TTX_SGR_PLAIN 0x07u  /* MODE 7, the terminal's colours: white on black, steady, its own (ESC [0m) */
 #define AT_DEF   0x40u       /* no colour was set: the terminal's own */
 
 /* ---- the text screen model ---------------------------------------------------
@@ -384,6 +439,8 @@ void tnd_out_set_mode(tnd_out_t *s, uint8_t mode)
    s->dirty = false;                             /* a new screen: nothing left to draw again */
    memset(s->ch, ' ', sizeof s->ch);
    memset(s->at, AT_KNOWN | AT_DEF, sizeof s->at);
+   memset(s->lattr, 0, sizeof s->lattr);
+   s->tsgr = TTX_SGR_PLAIN;
 }
 
 void tnd_out_assume_mode(tnd_out_t *s, uint8_t mode)
@@ -418,6 +475,7 @@ void tnd_out_touch(tnd_out_t *s, uint32_t now_us)
 
 void tnd_out_session(tnd_out_t *s)
 {
+   s->tsgr = 0xFFu;                              /* a new terminal: its colours are not known */
    s->hl_on = false;
    s->cc_on = false;
    s->npend = 0u;                                /* (the Beeb's own colours, `coloured`, carry on) */
@@ -513,6 +571,333 @@ static size_t put_glyph(const tnd_out_t *s, uint8_t *dst, uint8_t ch)
    return 1u;
 }
 
+/* ---- teletext (MODE 7) ------------------------------------------------------
+   The SAA5050 draws a row from left to right, and what a cell shows depends on
+   the control codes to its left: each row starts white on black, alphanumerics,
+   single height, and a control code changes that for the cells after it (colours,
+   graphics, flash, double height, release) or from its own cell (new and black
+   background, steady, normal height, conceal, contiguous and separated, hold).  A
+   control code's own cell is a space, or under hold graphics the last mosaic.
+
+   So once the model knows where the cursor is, each MODE 7 cell holds the byte
+   the screen holds (the MOS swaps #, _ and the pound as it stores them) and is
+   drawn from the state of the cells to its left: a character is one cell, a
+   control code (or a cell that held one) redraws the rest of its row.  Mosaics
+   are Unicode's sextants (the block U+1FB00, with the half and full blocks that
+   Unicode already had); the characters the SAA5050 has in place of ASCII are
+   their Unicode ones; double height is the terminal's double height line
+   (DECDHL), the first such row of a pair the top half, the next the bottom, as
+   the Beeb pairs them.  A terminal that does not do UTF-8 gets Latin-1 or a near
+   ASCII character. */
+
+typedef struct {
+   uint8_t fg, bg, held;
+   bool    gfx, sep, hold, flash, conceal, dh;
+} ttx_t;
+
+static void ttx_init(ttx_t *t)
+{
+   memset(t, 0, sizeof *t);
+   t->fg = 7u;
+   t->held = ' ';
+}
+
+/* The byte MODE 7's screen holds for one the Beeb printed. */
+static uint8_t ttx_store(uint8_t c)
+{
+   if (c >= 0xA0u)
+      return (uint8_t)(c & 0x7Fu);              /* the chip ignores bit 7 from &A0 */
+   switch (c) {
+   case 35u: return 0x5Fu;                      /* # */
+   case 95u: return 0x60u;                      /* _ (a long dash on the screen) */
+   case 96u: return 0x23u;                      /* the pound */
+   default:  return c;
+   }
+}
+
+static uint32_t ttx_mosaic(uint8_t b)
+{
+   unsigned v = (b & 0x1Fu) | ((b & 0x40u) >> 1);   /* bits 0-5: the six cells, top left first */
+   if (v == 0u)  return ' ';
+   if (v == 63u) return 0x2588u;                /* full block */
+   if (v == 21u) return 0x258Cu;                /* left half */
+   if (v == 42u) return 0x2590u;                /* right half */
+   return 0x1FB00u + (v - 1u) - (v > 21u ? 1u : 0u) - (v > 42u ? 1u : 0u);
+}
+
+static uint32_t ttx_alpha(uint8_t b)
+{
+   switch (b) {
+   case 0x23u: return 0xA3u;                    /* pound */
+   case 0x5Bu: return 0x2190u;                  /* left arrow */
+   case 0x5Cu: return 0xBDu;                    /* one half */
+   case 0x5Du: return 0x2192u;                  /* right arrow */
+   case 0x5Eu: return 0x2191u;                  /* up arrow */
+   case 0x5Fu: return '#';
+   case 0x60u: return 0x2015u;                  /* long dash */
+   case 0x7Bu: return 0xBCu;                    /* one quarter */
+   case 0x7Cu: return 0x2016u;                  /* double bar */
+   case 0x7Du: return 0xBEu;                    /* three quarters */
+   case 0x7Eu: return 0xF7u;                    /* divide */
+   case 0x7Fu: return 0x25A0u;                  /* block */
+   default:    return (b >= 0x20u && b < 0x7Fu) ? b : ' ';
+   }
+}
+
+/* One cell: what it shows (in *cp) with which colours, and the state after it. */
+static void ttx_step(ttx_t *t, uint8_t b, uint32_t *cp, uint8_t *fg, uint8_t *bg, bool *flash)
+{
+   if (b >= 0x80u && b < 0xA0u) {
+      switch (b) {                              /* set at: from this cell */
+      case 0x89u: t->flash = false; break;
+      case 0x8Cu: if (t->dh) { t->dh = false; t->held = ' '; } break;
+      case 0x98u: t->conceal = true; break;
+      case 0x99u: t->sep = false; break;
+      case 0x9Au: t->sep = true; break;
+      case 0x9Cu: t->bg = 0u; break;
+      case 0x9Du: t->bg = t->fg; break;
+      case 0x9Eu: t->hold = true; break;
+      default: break;
+      }
+      *cp = (t->hold && t->gfx) ? ttx_mosaic(t->held) : ' ';
+      *fg = t->fg; *bg = t->bg; *flash = t->flash;
+      if (b >= 0x81u && b <= 0x87u) {           /* set after: from the next cell */
+         t->fg = (uint8_t)(b & 7u);
+         if (t->gfx) t->held = ' ';
+         t->gfx = false;
+         t->conceal = false;
+      } else if (b >= 0x91u && b <= 0x97u) {
+         t->fg = (uint8_t)(b & 7u);
+         if (!t->gfx) t->held = ' ';
+         t->gfx = true;
+         t->conceal = false;
+      } else if (b == 0x88u) {
+         t->flash = true;
+      } else if (b == 0x8Du) {
+         if (!t->dh) t->held = ' ';
+         t->dh = true;
+      } else if (b == 0x9Fu) {
+         t->hold = false;
+      }
+      return;
+   }
+   if (t->gfx && (b & 0x20u) != 0u) {
+      *cp = ttx_mosaic(b);
+      t->held = b;
+   } else {
+      *cp = ttx_alpha(b);                       /* in graphics, &40-&5F blast through as capitals */
+   }
+   if (t->conceal)
+      *cp = ' ';
+   *fg = t->fg; *bg = t->bg; *flash = t->flash;
+}
+
+/* The state at the start of cell x of a row. */
+static void ttx_state(const tnd_out_t *s, unsigned y, unsigned x, ttx_t *t)
+{
+   uint32_t cp; uint8_t fg, bg; bool fl;
+   ttx_init(t);
+   for (unsigned i = 0u; i < x; i++)
+      ttx_step(t, s->ch[y][i], &cp, &fg, &bg, &fl);
+}
+
+static size_t ttx_put_cp(const tnd_out_t *s, uint8_t *dst, uint32_t cp)
+{
+   if (cp < 0x80u) {
+      dst[0] = (uint8_t)cp;
+      return 1u;
+   }
+   if (!s->utf8) {
+      if (cp <= 0xFFu) {
+         dst[0] = (uint8_t)cp;
+         return 1u;
+      }
+      switch (cp) {
+      case 0x2190u: dst[0] = '<'; break;
+      case 0x2192u: dst[0] = '>'; break;
+      case 0x2191u: dst[0] = '^'; break;
+      case 0x2015u: dst[0] = '-'; break;
+      case 0x2016u: dst[0] = '|'; break;
+      default:      dst[0] = '#'; break;      /* the block and the mosaics */
+      }
+      return 1u;
+   }
+   if (cp < 0x800u) {
+      dst[0] = (uint8_t)(0xC0u | (cp >> 6));
+      dst[1] = (uint8_t)(0x80u | (cp & 0x3Fu));
+      return 2u;
+   }
+   if (cp < 0x10000u) {
+      dst[0] = (uint8_t)(0xE0u | (cp >> 12));
+      dst[1] = (uint8_t)(0x80u | ((cp >> 6) & 0x3Fu));
+      dst[2] = (uint8_t)(0x80u | (cp & 0x3Fu));
+      return 3u;
+   }
+   dst[0] = (uint8_t)(0xF0u | (cp >> 18));
+   dst[1] = (uint8_t)(0x80u | ((cp >> 12) & 0x3Fu));
+   dst[2] = (uint8_t)(0x80u | ((cp >> 6) & 0x3Fu));
+   dst[3] = (uint8_t)(0x80u | (cp & 0x3Fu));
+   return 4u;
+}
+
+/* The terminal's colours for a cell, if they are not what it has. */
+static size_t ttx_sgr(uint8_t *tsgr, uint8_t *dst, uint8_t fg, uint8_t bg, bool flash)
+{
+   uint8_t key = (uint8_t)((fg & 7u) | ((bg & 7u) << 3) | (flash ? 0x40u : 0u));
+   size_t  n = 0u;
+
+   if (key == *tsgr)
+      return 0u;
+   *tsgr = key;
+   if (fg == 7u && bg == 0u && !flash)
+      return put_str(dst, "\x1b[0m");
+   n += put_str(dst, "\x1b[0;3");
+   dst[n++] = (uint8_t)('0' + (fg & 7u));
+   if (bg != 0u) {
+      n += put_str(dst + n, ";4");
+      dst[n++] = (uint8_t)('0' + (bg & 7u));
+   }
+   if (flash)
+      n += put_str(dst + n, ";5");
+   dst[n++] = 'm';
+   return n;
+}
+
+/* Cells x0 to x1 of row y, from the terminal's cursor on, *tsgr the colours the terminal
+   has: at most room bytes.  Returns the bytes written; *done is the last cell drawn (x0 - 1
+   if none fitted). */
+static size_t ttx_cells(const tnd_out_t *s, uint8_t *tsgr, uint8_t *dst, unsigned y, unsigned x0, unsigned x1,
+                        size_t room, unsigned *done)
+{
+   ttx_t    t;
+   size_t   n = 0u;
+   uint32_t cp; uint8_t fg, bg; bool fl;
+
+   ttx_state(s, y, x0, &t);
+   *done = x0 - 1u;
+   for (unsigned x = x0; x <= x1; x++) {
+      uint8_t buf[24];
+      size_t  k;
+      ttx_step(&t, s->ch[y][x], &cp, &fg, &bg, &fl);
+      uint8_t save = *tsgr;
+      k = ttx_sgr(tsgr, buf, fg, bg, fl);
+      k += ttx_put_cp(s, buf + k, cp);
+      if (n + k > room) {
+         *tsgr = save;
+         break;
+      }
+      memcpy(dst + n, buf, k);
+      n += k;
+      *done = x;
+   }
+   return n;
+}
+
+/* The last cell of row y that shows something (a character, or a background colour), or -1. */
+static int ttx_row_end(const tnd_out_t *s, unsigned y)
+{
+   ttx_t t; uint32_t cp; uint8_t fg, bg; bool fl;
+   int   end = -1;
+   ttx_init(&t);
+   for (unsigned x = 0u; x < s->cols; x++) {
+      ttx_step(&t, s->ch[y][x], &cp, &fg, &bg, &fl);
+      if (cp != ' ' || bg != 0u)
+         end = (int)x;
+   }
+   return end;
+}
+
+/* Is any cell of row y a double height one?  And does it use hold graphics? */
+static bool ttx_row_dh(const tnd_out_t *s, unsigned y)
+{
+   ttx_t t; uint32_t cp; uint8_t fg, bg; bool fl;
+   ttx_init(&t);
+   for (unsigned x = 0u; x < s->cols; x++) {
+      ttx_step(&t, s->ch[y][x], &cp, &fg, &bg, &fl);
+      if (t.dh)
+         return true;
+   }
+   return false;
+}
+
+static bool ttx_row_hold(const tnd_out_t *s, unsigned y)
+{
+   for (unsigned x = 0u; x < s->cols; x++)
+      if (s->ch[y][x] == 0x9Eu)
+         return true;
+   return false;
+}
+
+/* The line attribute each row should have: a double height row is the top half, unless
+   the row above is a top half, when it is the bottom. */
+static uint8_t ttx_lattr(const tnd_out_t *s, unsigned y)
+{
+   uint8_t prev = 0u;
+   for (unsigned r = 0u; r <= y; r++) {
+      uint8_t a = ttx_row_dh(s, r) ? (prev == 3u ? 4u : 3u) : 0u;
+      if (r == y)
+         return a;
+      prev = a;
+   }
+   return 0u;
+}
+
+static size_t ttx_put_lattr(uint8_t *dst, uint8_t a)
+{
+   return put_str(dst, a == 3u ? "\x1b#3" : a == 4u ? "\x1b#4" : "\x1b#5");
+}
+
+/* Bring the terminal's line attributes into line with the model's rows, the cursor put back
+   after.  Needs absolute positions. */
+static size_t ttx_sync_lattr(tnd_out_t *s, uint8_t *dst, size_t room)
+{
+   size_t n = 0u;
+   bool   moved = false;
+   uint8_t prev = 0u;
+
+   if (!s->tele || !s->sync || !s->origin_ok)
+      return 0u;
+   for (unsigned y = 0u; y < s->rows; y++) {
+      uint8_t a = ttx_row_dh(s, y) ? (prev == 3u ? 4u : 3u) : 0u;
+      prev = a;
+      if (a == s->lattr[y])
+         continue;
+      if (n + 16u > room)
+         break;
+      n += put_pos(dst + n, 0u, y);
+      n += ttx_put_lattr(dst + n, a);
+      s->lattr[y] = a;
+      moved = true;
+   }
+   if (moved)
+      n += put_pos(dst + n, s->cx, s->cy);
+   return n;
+}
+
+/* Back to single width and height on every row the terminal has a line attribute on
+   (before the screen is cleared: a terminal may keep them through a clear). */
+static size_t ttx_clear_lattr(tnd_out_t *s, uint8_t *dst)
+{
+   size_t n = 0u;
+   for (unsigned y = 0u; y < TND_ROWS_MAX; y++)
+      if (s->lattr[y] != 0u) {
+         n += put_pos(dst + n, 0u, y);
+         n += put_str(dst + n, "\x1b#5");
+         s->lattr[y] = 0u;
+      }
+   return n;
+}
+
+/* MODE 7: the terminal's own colours again, if a cell left it with others, before anything that
+   fills with the background colour (a clear, a scroll). */
+static size_t ttx_plain(tnd_out_t *s, uint8_t *dst)
+{
+   if (!s->tele || s->tsgr == TTX_SGR_PLAIN)
+      return 0u;
+   s->tsgr = TTX_SGR_PLAIN;
+   return put_str(dst, "\x1b[0m");
+}
+
 /* Put the terminal's colours back to what the Beeb has set, and its cursor to the Beeb's. */
 static size_t put_finish(const tnd_out_t *s, uint8_t *dst)
 {
@@ -590,6 +975,11 @@ static size_t scr_scroll_up(tnd_out_t *s, uint8_t *dst)
          s->at[y][x] = s->at[y + 1u][x];
       }
    scr_clear(s, s->wl, s->wb, s->wr, s->wb);
+   if (full_width(s)) {                          /* the terminal's lines move with their attributes */
+      for (unsigned y = s->wt; y < s->wb; y++)
+         s->lattr[y] = s->lattr[y + 1u];
+      s->lattr[s->wb] = 0u;
+   }
    if (s->hl_on) {
       if (s->hly > s->wt) s->hly--; else s->hl_on = false;
    }
@@ -597,12 +987,14 @@ static size_t scr_scroll_up(tnd_out_t *s, uint8_t *dst)
       if (s->ccy > s->wt) s->ccy--; else s->cc_on = false;
    }
    if (s->sync && s->origin_ok && full_width(s)) {
+      n += ttx_plain(s, dst + n);
       dst[n++] = 27u; dst[n++] = '[';
       n += put_num(dst + n, (unsigned)s->wt + 1u);
       dst[n++] = ';';
       n += put_num(dst + n, (unsigned)s->wb + 1u);
       dst[n++] = 'r';
       n += put_str(dst + n, "\x1b[1S\x1b[r");
+      n += ttx_sync_lattr(s, dst + n, 200u);     /* a scroll can change which half a double row is */
    } else if (s->sync && s->origin_ok) {
       mark_dirty(s, s->wl, s->wt, s->wr, s->wb);
    }
@@ -619,6 +1011,11 @@ static size_t scr_scroll_down(tnd_out_t *s, uint8_t *dst)
          s->at[y][x] = s->at[y - 1u][x];
       }
    scr_clear(s, s->wl, s->wt, s->wr, s->wt);
+   if (full_width(s)) {
+      for (unsigned y = s->wb; y > s->wt; y--)
+         s->lattr[y] = s->lattr[y - 1u];
+      s->lattr[s->wt] = 0u;
+   }
    if (s->hl_on) {
       if (s->hly < s->wb) s->hly++; else s->hl_on = false;
    }
@@ -626,12 +1023,14 @@ static size_t scr_scroll_down(tnd_out_t *s, uint8_t *dst)
       if (s->ccy < s->wb) s->ccy++; else s->cc_on = false;
    }
    if (s->sync && s->origin_ok && full_width(s)) {
+      n += ttx_plain(s, dst + n);
       dst[n++] = 27u; dst[n++] = '[';
       n += put_num(dst + n, (unsigned)s->wt + 1u);
       dst[n++] = ';';
       n += put_num(dst + n, (unsigned)s->wb + 1u);
       dst[n++] = 'r';
       n += put_str(dst + n, "\x1b[1T\x1b[r");
+      n += ttx_sync_lattr(s, dst + n, 200u);     /* a scroll can change which half a double row is */
    } else if (s->sync && s->origin_ok) {
       mark_dirty(s, s->wl, s->wt, s->wr, s->wb);
    }
@@ -672,6 +1071,143 @@ static size_t scr_newline(tnd_out_t *s, uint8_t *dst)
    return n;
 }
 
+/* A character the Beeb prints in MODE 7, the cursor known: stored as the screen holds it and
+   drawn - the one cell, or for a control code (or over one, or in a row with hold graphics) the
+   rest of the row - and the cursor moved on.  What does not fit is drawn later (the dirty rows). */
+static size_t ttx_glyph(tnd_out_t *s, uint8_t c, uint8_t *dst)
+{
+   uint8_t  b = ttx_store(c);
+   uint8_t  old = s->ch[s->cy][s->cx];
+   bool     ctl = (b >= 0x80u && b < 0xA0u) || (old >= 0x80u && old < 0xA0u);
+   unsigned end = s->cx, done;
+   int      before = (ctl || ttx_row_hold(s, s->cy)) ? ttx_row_end(s, s->cy) : -1;
+   size_t   n;
+
+   s->ch[s->cy][s->cx] = b;
+   s->at[s->cy][s->cx] = AT_KNOWN | AT_DEF;
+   if (ctl || (old != b && ttx_row_hold(s, s->cy))) {   /* the rest of the row, as far as it shows anything */
+      int after = ttx_row_end(s, s->cy);
+      int last = before > after ? before : after;
+      if (last > (int)end)
+         end = (unsigned)last;
+   }
+   n = ttx_cells(s, &s->tsgr, dst, s->cy, s->cx, end, TND_OUT_MAX - 160u, &done);
+   if (done < end && s->origin_ok)
+      mark_dirty(s, done + 1u, s->cy, end, s->cy);
+   if (end > s->cx && s->cx < s->wr) {          /* back to the cell after this one */
+      dst[n++] = 27u; dst[n++] = '[';
+      n += put_num(dst + n, (unsigned)s->cx + 2u);
+      dst[n++] = 'G';
+   }
+   if (b == 0x8Du || old == 0x8Du)
+      n += ttx_sync_lattr(s, dst + n, TND_OUT_MAX - 60u - n);
+   if (s->cx < s->wr)
+      s->cx++;
+   else
+      n += scr_newline(s, dst + n);
+   return n;
+}
+
+/* ---- graphics: xterm's Tektronix 4014 mode -----------------------------------------
+   MOVE, DRAW and PLOT (VDU 25) cannot be text, but xterm still has the storage tube
+   terminal it grew out of: CSI ? 38 h puts it in Tektronix mode (its Tek window), GS
+   starts a vector at the first point and draws to each one after, ESC FF clears the
+   page, and ESC ETX goes back to the text screen.  The Beeb's 1280 x 1024 is the Tek's
+   1024 x 780.  A storage tube cannot rub out, so drawing in the background colour or
+   inverting (PLOT 2, 3, 6, 7) only moves.  Lines, points, triangles (outlined) and
+   rectangles (outlined, the Master's PLOT 96) are drawn; the rest moves. */
+
+void tnd_out_tek(tnd_out_t *s, bool on)
+{
+   s->tek = on;
+}
+
+static size_t tek_enter(tnd_out_t *s, uint8_t *dst)
+{
+   if (s->tek_on)
+      return 0u;
+   s->tek_on = true;
+   return put_str(dst, "\x1b[?38h");
+}
+
+static size_t tek_leave(tnd_out_t *s, uint8_t *dst)
+{
+   if (!s->tek_on)
+      return 0u;
+   s->tek_on = false;
+   s->tsgr = 0xFFu;
+   return put_str(dst, "\x1b\x03");
+}
+
+static size_t tek_xy(uint8_t *dst, int x, int y)
+{
+   int tx = x * 1024 / 1280, ty = y * 780 / 1024;
+   if (tx < 0) tx = 0;
+   if (tx > 1023) tx = 1023;
+   if (ty < 0) ty = 0;
+   if (ty > 779) ty = 779;
+   dst[0] = (uint8_t)(0x20 | ((ty >> 5) & 0x1F));
+   dst[1] = (uint8_t)(0x60 | (ty & 0x1F));
+   dst[2] = (uint8_t)(0x20 | ((tx >> 5) & 0x1F));
+   dst[3] = (uint8_t)(0x40 | (tx & 0x1F));
+   return 4u;
+}
+
+/* A polyline through n points, as one GS vector. */
+static size_t tek_lines(tnd_out_t *s, uint8_t *dst, const int16_t *xy, unsigned n)
+{
+   size_t k = tek_enter(s, dst);
+   dst[k++] = 0x1Du;
+   for (unsigned i = 0u; i < n; i++)
+      k += tek_xy(dst + k, xy[2u * i], xy[2u * i + 1u]);
+   return k;
+}
+
+static size_t tek_plot(tnd_out_t *s, uint8_t *dst)
+{
+   uint8_t  k = s->p[0];
+   int16_t  x = (int16_t)(s->p[1] | (s->p[2] << 8)), y = (int16_t)(s->p[3] | (s->p[4] << 8));
+   unsigned type = k & 0xF8u, how = k & 3u;
+   size_t   n = 0u;
+
+   if ((k & 4u) != 0u) {                        /* absolute, from the graphics origin */
+      x = (int16_t)(x + s->ox);
+      y = (int16_t)(y + s->oy);
+   } else {                                     /* relative to the graphics cursor */
+      x = (int16_t)(x + s->gx);
+      y = (int16_t)(y + s->gy);
+   }
+   if (s->tek && how == 1u) {                   /* drawn in the foreground: the only kind a tube shows */
+      if (type < 64u) {                         /* the lines (solid, dotted, dashed, with or without the end) */
+         int16_t v[4] = { s->gx, s->gy, x, y };
+         n = tek_lines(s, dst, v, 2u);
+      } else if (type == 64u) {                 /* a point */
+         int16_t v[4] = { x, y, x, y };
+         n = tek_lines(s, dst, v, 2u);
+      } else if (type == 80u) {                 /* a triangle, outlined */
+         int16_t v[8] = { s->g1x, s->g1y, s->gx, s->gy, x, y, s->g1x, s->g1y };
+         n = tek_lines(s, dst, v, 4u);
+      } else if (type == 96u) {                 /* a rectangle (Master), outlined */
+         int16_t v[10] = { s->gx, s->gy, x, s->gy, x, y, s->gx, y, s->gx, s->gy };
+         n = tek_lines(s, dst, v, 5u);
+      }
+   }
+   s->g2x = s->g1x; s->g2y = s->g1y;
+   s->g1x = s->gx;  s->g1y = s->gy;
+   s->gx = x;       s->gy = y;
+   return n;
+}
+
+static size_t tek_clear(tnd_out_t *s, uint8_t *dst)
+{
+   size_t n;
+   if (!s->tek)
+      return 0u;
+   n = tek_enter(s, dst);
+   n += put_str(dst + n, "\x1b\x0c");
+   return n;
+}
+
 static size_t finish_code(tnd_out_t *s, uint8_t dst[TND_OUT_MAX])
 {
    uint8_t code = s->code;
@@ -680,6 +1216,8 @@ static size_t finish_code(tnd_out_t *s, uint8_t dst[TND_OUT_MAX])
    s->code = 0u;
    switch (code) {
    case 17:                                     /* COLOUR: 0-127 text, 128-255 background */
+      if (s->tele && s->sync)                    /* MODE 7 has no COLOUR: the control codes do it */
+         break;
       if (s->p[0] < 128u) {
          s->fg = (uint8_t)(s->p[0] & (s->ncol - 1u));
          n = sgr(dst, '3', phys(s, s->fg));
@@ -688,6 +1226,7 @@ static size_t finish_code(tnd_out_t *s, uint8_t dst[TND_OUT_MAX])
          n = sgr(dst, '4', phys(s, s->bg));
       }
       s->coloured = true;
+      s->tsgr = 0xFFu;
       break;
    case 19:                                     /* palette: logical colour p0 shows as physical p1 */
       if (!s->tele) {
@@ -701,12 +1240,27 @@ static size_t finish_code(tnd_out_t *s, uint8_t dst[TND_OUT_MAX])
    case 22:                                     /* MODE: the screen is cleared */
       if (s->coloured)
          n += put_str(dst + n, "\x1b[0m");
+      else
+         n += ttx_plain(s, dst + n);
+      n += ttx_clear_lattr(s, dst + n);          /* teletext double height lines back to single */
+      if (s->tek) {                              /* the graphics go with the screen */
+         n += tek_clear(s, dst + n);
+         n += tek_leave(s, dst + n);
+      }
+      s->gx = s->gy = s->ox = s->oy = 0;
       tnd_out_set_mode(s, s->p[0]);
       s->sync = true;
       s->colok = true;
       s->origin_ok = true;
       s->coloured = false;
       n += put_str(dst + n, "\x1b[2J\x1b[H");
+      break;
+   case 25:                                     /* PLOT k,x,y */
+      n = tek_plot(s, dst);
+      break;
+   case 29:                                     /* the graphics origin */
+      s->ox = (int16_t)(s->p[0] | (s->p[1] << 8));
+      s->oy = (int16_t)(s->p[2] | (s->p[3] << 8));
       break;
    case 23:                                     /* VDU 23,1,n: the cursor off (0) or on */
       if (s->p[0] == 1u) {
@@ -777,12 +1331,13 @@ static size_t glyph(tnd_out_t *s, uint8_t c, uint8_t *dst, uint8_t *stored, int 
    }
 }
 
-size_t tnd_out_byte(tnd_out_t *s, uint8_t c, uint8_t dst[TND_OUT_MAX])
+static size_t out_byte(tnd_out_t *s, uint8_t c, uint8_t *dst)
 {
    size_t n = 0u;
 
+
    if (s->code != 0u) {                         /* a parameter byte of a VDU code */
-      if (s->got < 4u)
+      if (s->got < sizeof s->p)
          s->p[s->got] = c;
       s->got++;
       if (s->got >= vdu_params(s->code))
@@ -866,7 +1421,9 @@ size_t tnd_out_byte(tnd_out_t *s, uint8_t c, uint8_t dst[TND_OUT_MAX])
             s->dirty = false;
             s->cx = s->wl; s->cy = s->wt;
             s->origin_ok = true;
-            n = put_str(dst, "\x1b[2J\x1b[H");
+            n = ttx_plain(s, dst);
+            n += ttx_clear_lattr(s, dst + n);
+            n += put_str(dst + n, "\x1b[2J\x1b[H");
          } else if (s->sync && s->origin_ok) {   /* only the window: drawn again, nothing else touched */
             scr_clear(s, s->wl, s->wt, s->wr, s->wb);
             s->cx = s->wl; s->cy = s->wt;
@@ -924,6 +1481,30 @@ size_t tnd_out_byte(tnd_out_t *s, uint8_t c, uint8_t dst[TND_OUT_MAX])
       return n;
    }
 
+   if (c == 127u && s->tele && s->sync && s->cx > s->wl) {   /* DELETE in MODE 7: the cell drawn again as a space */
+      uint8_t  old;
+      unsigned end, done;
+      int      before;
+      s->cx--;
+      old = s->ch[s->cy][s->cx];
+      before = ttx_row_end(s, s->cy);
+      s->ch[s->cy][s->cx] = ' ';
+      s->at[s->cy][s->cx] = AT_KNOWN | AT_DEF;
+      end = s->cx;
+      if (old >= 0x80u && old < 0xA0u && before > (int)end)
+         end = (unsigned)before;
+      dst[n++] = 8u;
+      n += ttx_cells(s, &s->tsgr, dst + n, s->cy, s->cx, end, TND_OUT_MAX - 160u, &done);
+      if (done < end && s->origin_ok)
+         mark_dirty(s, done + 1u, s->cy, end, s->cy);
+      dst[n++] = 27u; dst[n++] = '[';
+      n += put_num(dst + n, (unsigned)s->cx + 1u);
+      dst[n++] = 'G';
+      if (old == 0x8Du)
+         n += ttx_sync_lattr(s, dst + n, TND_OUT_MAX - 60u - n);
+      return n;
+   }
+
    if (c == 127u) {                             /* DELETE: back, blank, back */
       if (s->cx > s->wl) {
          s->cx--;
@@ -947,6 +1528,8 @@ size_t tnd_out_byte(tnd_out_t *s, uint8_t c, uint8_t dst[TND_OUT_MAX])
       return 3u;
    }
 
+   if (s->tele && s->sync)
+      return ttx_glyph(s, c, dst);
    {
       uint8_t stored;
       int     newfg;
@@ -958,6 +1541,7 @@ size_t tnd_out_byte(tnd_out_t *s, uint8_t c, uint8_t dst[TND_OUT_MAX])
       if (newfg >= 0) {
          s->fg = (uint8_t)newfg;
          s->coloured = true;
+         s->tsgr = 0xFFu;
       }
       if (s->cx < s->wr)
          s->cx++;
@@ -965,6 +1549,21 @@ size_t tnd_out_byte(tnd_out_t *s, uint8_t c, uint8_t dst[TND_OUT_MAX])
          n += scr_newline(s, dst + n);
       return n;
    }
+}
+
+/* Graphics first: anything that is not one of the graphics codes takes the terminal back
+   from its Tek window to the text screen, and CLG (VDU 16) clears the Tek page. */
+size_t tnd_out_byte(tnd_out_t *s, uint8_t c, uint8_t dst[TND_OUT_MAX])
+{
+   size_t n = 0u;
+
+   if (s->code == 0u && !s->disabled) {
+      if (c == 16u)
+         return tek_clear(s, dst);
+      if (s->tek_on && c != 18u && c != 25u && c != 29u)
+         n = tek_leave(s, dst);
+   }
+   return n + out_byte(s, c, dst + n);
 }
 
 /* ---- the copy cursor -------------------------------------------------------
@@ -1007,6 +1606,7 @@ bool tnd_out_has_line(const tnd_out_t *s, const char *text, size_t len)
 
 void tnd_out_origin_lost(tnd_out_t *s)
 {
+   s->tsgr = s->coloured ? 0xFFu : TTX_SGR_PLAIN;
    s->origin_ok = false;
    s->dirty = false;
    s->colok = true;                              /* the cursor's column is the Beeb's */
@@ -1055,6 +1655,24 @@ size_t tnd_out_repaint(const tnd_out_t *s, unsigned row, uint8_t dst[TND_REPAINT
    if (row >= s->rows || (int)row < first || (int)row > last)
       return 0u;
 
+   if (s->tele) {                                /* teletext: the row as the chip draws it */
+      uint8_t  tsgr = TTX_SGR_PLAIN;
+      uint8_t  la = ttx_lattr(s, row);
+      int      tend = ttx_row_end(s, row);
+      unsigned done;
+      n += put_str(dst + n, "\x1b[0m");
+      if (la != 0u)
+         n += ttx_put_lattr(dst + n, la);
+      if (tend >= 0)
+         n += ttx_cells(s, &tsgr, dst + n, row, 0u, (unsigned)tend, TND_REPAINT_MAX - 24u - n, &done);
+      n += put_str(dst + n, "\x1b[0m");
+      if ((int)row < last) {
+         dst[n++] = 13u;
+         dst[n++] = 10u;
+      }
+      return n;
+   }
+
    int end = -1;                                 /* the row, without its trailing blanks */
    for (unsigned x = 0u; x < s->cols; x++)
       if ((s->at[row][x] & AT_KNOWN) != 0u && s->ch[row][x] != ' ')
@@ -1093,6 +1711,21 @@ size_t tnd_out_dirty_row(tnd_out_t *s, uint8_t dst[TND_REPAINT_MAX])
    uint8_t  prev = AT_DEF;
    n += put_pos(dst, s->dl, y);
    n += put_str(dst + n, "\x1b[0m");
+   if (s->tele) {
+      unsigned done;
+      s->tsgr = TTX_SGR_PLAIN;
+      n += ttx_cells(s, &s->tsgr, dst + n, y, s->dl, s->dr, TND_REPAINT_MAX - 80u - n, &done);
+      n += put_str(dst + n, "\x1b[0m");
+      if (s->hl_on && s->hly == y && s->hlx >= s->dl && s->hlx <= s->dr)
+         s->hl_on = false;
+      n += put_finish(s, dst + n);
+      s->tsgr = s->coloured ? 0xFFu : TTX_SGR_PLAIN;
+      if (y >= s->db)
+         s->dirty = false;
+      else
+         s->dt = (uint8_t)(y + 1u);
+      return n;
+   }
    for (unsigned x = s->dl; x <= s->dr; x++) {
       uint8_t at = (s->at[y][x] & AT_KNOWN) != 0u ? (uint8_t)(s->at[y][x] & ~AT_KNOWN) : AT_DEF;
       if (n + 24u > TND_REPAINT_MAX - 48u)
@@ -1162,6 +1795,23 @@ static void cc_apply(tnd_out_t *s, uint8_t op)
    }
 }
 
+/* One teletext cell as the chip shows it, reversed for the copy cursor's mark. */
+static size_t ttx_mark(const tnd_out_t *s, uint8_t *dst, unsigned x, unsigned y, bool reverse)
+{
+   ttx_t    t;
+   uint32_t cp; uint8_t fg, bg; bool fl;
+   uint8_t  tsgr = 0xFFu;
+   size_t   n;
+
+   ttx_state(s, y, x, &t);
+   ttx_step(&t, s->ch[y][x], &cp, &fg, &bg, &fl);
+   n = ttx_sgr(&tsgr, dst, fg, bg, fl);
+   if (reverse)
+      n += put_str(dst + n, "\x1b[7m");
+   n += ttx_put_cp(s, dst + n, cp);
+   return n;
+}
+
 size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX])
 {
    size_t n = 0u;
@@ -1181,22 +1831,32 @@ size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX
 
    if (s->hl_on) {                              /* the old mark goes: the cell as it was */
       n += put_pos(dst + n, s->hlx, s->hly);
-      n += put_attr(s, dst + n, s->at[s->hly][s->hlx]);
-      n += put_glyph(s, dst + n, s->ch[s->hly][s->hlx]);
+      if (s->tele) {
+         n += ttx_mark(s, dst + n, s->hlx, s->hly, false);
+      } else {
+         n += put_attr(s, dst + n, s->at[s->hly][s->hlx]);
+         n += put_glyph(s, dst + n, s->ch[s->hly][s->hlx]);
+      }
       s->hl_on = false;
    }
    if (s->cc_on && (s->ccx != s->cx || s->ccy != s->cy)
        && (s->at[s->ccy][s->ccx] & AT_KNOWN) != 0u) {
       n += put_pos(dst + n, s->ccx, s->ccy);
-      n += put_attr(s, dst + n, s->at[s->ccy][s->ccx]);
-      n += put_str(dst + n, "\x1b[7m");
-      n += put_glyph(s, dst + n, s->ch[s->ccy][s->ccx]);
+      if (s->tele) {
+         n += ttx_mark(s, dst + n, s->ccx, s->ccy, true);
+      } else {
+         n += put_attr(s, dst + n, s->at[s->ccy][s->ccx]);
+         n += put_str(dst + n, "\x1b[7m");
+         n += put_glyph(s, dst + n, s->ch[s->ccy][s->ccx]);
+      }
       s->hl_on = true;
       s->hlx = s->ccx;
       s->hly = s->ccy;
    }
-   if (n != 0u)
+   if (n != 0u) {
       n += put_finish(s, dst + n);
+      s->tsgr = s->coloured ? 0xFFu : TTX_SGR_PLAIN;
+   }
    return n;
 }
 

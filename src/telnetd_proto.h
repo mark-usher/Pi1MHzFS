@@ -20,7 +20,7 @@
 
 /* ---- client -> Beeb ---------------------------------------------------- */
 
-#define TND_IN_KEYS    2u      /* most keys one input byte can release        */
+#define TND_IN_KEYS    3u      /* most keys one input byte can release (Alt-P, then a key) */
 
 /* Not a key but a request: the client pressed ESC (a lone ESC, once it is clear
    no sequence follows) or Ctrl-C.  The Beeb's ESCAPE is a condition the keyboard
@@ -51,6 +51,9 @@ typedef struct {
    uint32_t esc_us;             /* when the ESC that opened the sequence arrived */
    uint8_t  seen_will[32];      /* respond-once bitmaps, over 256 options */
    uint8_t  seen_do[32];
+   uint8_t  dcs[16];            /* the start of a DCS the terminal sent (its answer to CSI > q) */
+   uint8_t  ndcs;
+   bool     xterm;              /* the terminal said it is xterm: it can draw in Tektronix 4014 mode */
 } tnd_in_t;
 
 void   tnd_in_reset(tnd_in_t *s);
@@ -78,16 +81,16 @@ size_t tnd_in_tick(tnd_in_t *s, uint32_t now_us, uint8_t keys[TND_IN_KEYS]);
 
 /* ---- Beeb -> terminal ---------------------------------------------------- */
 
-#define TND_OUT_MAX    48u     /* most bytes one VDU byte can expand to */
+#define TND_OUT_MAX    640u    /* most bytes one VDU byte can expand to (a teletext row redrawn) */
 #define TND_COPY_MAX   96u     /* most bytes tnd_out_copyflush writes */
-#define TND_REPAINT_MAX 400u   /* most bytes tnd_out_repaint writes */
+#define TND_REPAINT_MAX 900u   /* most bytes tnd_out_repaint writes (a teletext row of mosaics) */
 #define TND_COLS_MAX   80u
 #define TND_ROWS_MAX   32u
 
 typedef struct {
    uint8_t code;                /* the VDU code whose parameters are being collected, 0 = none */
    uint8_t got;                 /* parameters collected so far */
-   uint8_t p[4];                /* the ones the translator uses */
+   uint8_t p[5];                /* the ones the translator uses */
    bool    disabled;            /* VDU 21 seen: everything is ignored until VDU 6 */
    bool    coloured;            /* a colour was set: reset it at the end of the line */
    bool    utf8;                /* the pound sign as UTF-8 (else Latin-1) */
@@ -113,6 +116,12 @@ typedef struct {
    uint8_t  dl, dt, dr, db;     /* ... left, top (the next row to draw), right, bottom */
    uint8_t  ch[TND_ROWS_MAX][TND_COLS_MAX];   /* what is on each cell */
    uint8_t  at[TND_ROWS_MAX][TND_COLS_MAX];   /* and its colours; bit 7: seen, bit 6: no colour set */
+   uint8_t  lattr[TND_ROWS_MAX];  /* MODE 7: the line attribute the terminal has (0 normal, 3 top, 4 bottom of double height) */
+   uint8_t  tsgr;               /* MODE 7: the colours the terminal has (fg | bg << 3 | flash << 6), 0xFF unknown */
+   bool     tek;                /* the terminal is xterm: graphics (VDU 25) are drawn in its Tektronix 4014 window */
+   bool     tek_on;             /* ... and it is in Tektronix mode now */
+   int16_t  gx, gy, ox, oy;     /* the Beeb's graphics cursor and origin (VDU 29), in its 1280 x 1024 units */
+   int16_t  g1x, g1y, g2x, g2y; /* the two points visited before it, for a triangle */
 } tnd_out_t;
 
 void   tnd_out_reset(tnd_out_t *s, bool utf8);
@@ -155,6 +164,10 @@ size_t tnd_out_repaint(const tnd_out_t *s, unsigned row, uint8_t dst[TND_REPAINT
    the daemon then calls this, a row at a time, until it says nothing is left (0): each call
    draws one row of the rectangle from the model and puts the cursor and colours back. */
 size_t tnd_out_dirty_row(tnd_out_t *s, uint8_t dst[TND_REPAINT_MAX]);
+
+/* The terminal can draw Tektronix 4014 graphics (xterm said so): MOVE, DRAW and PLOT (VDU 25)
+   and CLG are drawn in its Tek window.  Off by default, and then they are swallowed as before. */
+void   tnd_out_tek(tnd_out_t *s, bool on);
 
 void   tnd_out_touch(tnd_out_t *s, uint32_t now_us);
 void   tnd_out_copykey(tnd_out_t *s, uint8_t key);

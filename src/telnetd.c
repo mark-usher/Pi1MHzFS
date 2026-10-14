@@ -32,6 +32,8 @@
      telnetd_mode=7       the Beeb's screen mode (0-7) until it sends a MODE: its size
                           cannot be read, and the daemon needs it to follow the text
      telnetd_copycursor=1 0: do not mark the copy cursor in the terminal
+     telnetd_tek=1        draw the Beeb's graphics (VDU 25) in the terminal's Tektronix 4014
+                          window when it says it is xterm (asked by CSI > q); 0: never
 */
 #include <stdbool.h>
 #include <stdint.h>
@@ -53,7 +55,12 @@
 
 #define KRING_SIZE   4096u               /* power of two */
 #define KRING_MASK   (KRING_SIZE - 1u)
-#define OBUF_SIZE    2048u
+#define OBUF_SIZE    4096u
+/* Output is sent in batches: once OUT_BATCH bytes are waiting or the oldest has waited OUT_HOLD_US.
+   A segment per main-loop pass, a few bytes each, is a Wi-Fi frame each, and the frames, not the
+   bytes, are what the link runs out of (a stream from the Beeb reached the client at ~350 bytes/s). */
+#define OUT_BATCH    1024u
+#define OUT_HOLD_US  8000u
 #define LOGIN_MAX    32u
 #define LOGIN_US     60000000u           /* a session must be logged in by then */
 #define LOCKOUT_US   10000000u           /* after three wrong passwords */
@@ -70,6 +77,7 @@ static struct tcp_pcb *g_listener;
 static struct tcp_pcb *g_pcb;            /* the one session */
 static uint16_t        g_port;
 static bool            g_ansi = true;
+static bool            g_tek = true;          /* telnetd_tek: graphics to an xterm's Tek window */
 static bool            g_utf8 = true;
 static bool            g_copy = true;         /* show the copy cursor */
 static bool            g_repaint;             /* a new terminal is being drawn from the model */
@@ -113,6 +121,7 @@ static uint8_t   g_kring[KRING_SIZE];    /* keys for the Beeb */
 static uint32_t  g_khead, g_ktail;
 static uint8_t   g_obuf[OBUF_SIZE];      /* bytes for the client */
 static size_t    g_olen, g_opos;
+static uint32_t  g_obuf_us;              /* when the oldest byte not yet given to TCP was put in */
 
 /* ---- buffers ------------------------------------------------------------ */
 
@@ -134,6 +143,8 @@ static void o_put(const void *p, size_t n)
 {
    if (n > o_room())
       n = o_room();
+   if (g_olen == g_opos && n != 0u)
+      g_obuf_us = Pi1MHz_now_us;
    o_compact();
    memcpy(g_obuf + g_olen, p, n);
    g_olen += n;
@@ -538,6 +549,8 @@ static err_t td_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 
    tnd_in_reset(&g_in);
    tnd_out_session(&g_out);                     /* the model has been following the Beeb all along */
+   tnd_out_tek(&g_out, false);                  /* until this terminal says it is xterm */
+   g_out.tek_on = false;
    g_scan_pending = !g_out.sync || tnd_out_blank(&g_out);   /* a model that knows nothing: the ROM is asked for the Beeb's screen (below); one that does is drawn, with its colours */
    g_repaint = g_ansi && g_out.sync;            /* ... so a terminal that has just come is drawn from it */
    g_repaint_row = 0u;
@@ -549,6 +562,8 @@ static err_t td_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
       uint8_t g[TND_GREETING_LEN];
       o_put(g, tnd_greeting(g));
    }
+   if (g_ansi && g_tek)
+      o_str("\x1b[>q");                         /* XTVERSION: xterm answers, and can draw the Beeb's graphics */
    o_str("\r\nPi1MHz telnet - keyboard and screen\r\n");
    {                                            /* what came up when the Beeb started: the banners, unless the screen shows them */
       unsigned first = 0u;
@@ -580,7 +595,8 @@ static void pump(void)
 {
    if (g_pcb == NULL)
       return;
-   if (g_opos < g_olen) {
+   if (g_opos < g_olen && (g_olen - g_opos >= OUT_BATCH || g_close_after
+                           || (uint32_t)(Pi1MHz_now_us - g_obuf_us) >= OUT_HOLD_US)) {
       size_t want = g_olen - g_opos;
       size_t room = tcp_sndbuf(g_pcb);
       if (want > room)
@@ -684,6 +700,7 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
 
    if (g_pcb == NULL)
       return;
+   tnd_out_tek(&g_out, g_tek && g_ansi && g_in.xterm);   /* the terminal answered CSI > q as xterm */
 
    if (g_stage != S_LIVE && (now_us - g_start_us) >= LOGIN_US) {
       o_str("\r\nLogin timed out\r\n");
@@ -836,6 +853,7 @@ void telnetd_init(void)
    g_ansi = cfg_flag("telnetd_ansi", true);
    g_utf8 = cfg_flag("telnetd_utf8", true);
    g_copy = cfg_flag("telnetd_copycursor", true);
+   g_tek = cfg_flag("telnetd_tek", true);
    tnd_out_reset(&g_out, g_utf8);
    {
       const char *m = config_get("telnetd_mode");

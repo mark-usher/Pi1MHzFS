@@ -91,6 +91,8 @@ def call(rom, a, x, y, pi_after=0, reset_type=2, pokes=None, watch=()):
     for i, b in enumerate((0x8E, 0x88, 0xFC, 0xA9, 0x55, 0xA0, 0x66, 0xA2, 0xFF, 0x60)):
         mem._subject[HELPER + i] = b
     mem._subject[OSBYTE] = 0x60          # the MOS's OSBYTE: modelled below, then RTS
+    mem._subject[0xFFEE] = 0x60          # OSWRCH and OSNEWL: the name printed after a direct hook-in
+    mem._subject[0xFFE7] = 0x60
     mem._subject[RETURN_TRAP] = 0xEA
     mpu = MPU(memory=mem, pc=SERVICE)
     mpu.a, mpu.x, mpu.y = a, x, y
@@ -108,6 +110,10 @@ def call(rom, a, x, y, pi_after=0, reset_type=2, pokes=None, watch=()):
             out["osbytes"].append((mpu.a, mpu.x, mpu.y))
             if mpu.a == 0xFD:
                 mpu.x = reset_type
+            elif mpu.a == 135:           # the character at the cursor (X) and the MODE (Y)
+                mpu.x, mpu.y = 0x20, 7
+            elif mpu.a == 134:           # the text cursor: X column, Y row
+                mpu.x, mpu.y = 5, 9
         elif ROM_BASE <= mpu.pc < ROM_BASE + 0x4000:
             opcodes.append(mem._subject[mpu.pc])
         mpu.step()
@@ -330,6 +336,33 @@ def main(path):
     r = call(rom, 1, 4, 0, pi_after=None, reset_type=2, pokes={0x022A: 0xCC, 0x022B: 0xFC}, watch=(0xFCF4,))
     check(r["writes"] == [], "no Pi: nothing is written")
 
+    # 1b. the Pi's serial stub at &FCCC (any firmware, with or without 6502code.bin): the ROM hooks
+    # it in itself, as helper 20 would, and no helper runs
+    STUBA = 0xFCCC
+    stub = {STUBA: 0xE0, STUBA + 1: 0x02, STUBA + 2: 0xD0, STUBA + 0x30: 0x60,
+            0x22A: 0x34, 0x22B: 0x12, 0x204: 0x78, 0x205: 0x56, 0x22C: 0xA0, 0x22D: 0xE4}
+    for pi_after in (0, None):                 # the helper window up, or no 6502code.bin at all
+        r = call(rom, 1, 9, 2, pi_after=pi_after, reset_type=2, pokes=stub, watch=(STUBA + 0x28,))
+        m = r["mem"]._subject
+        check(r["helper_writes"] == [], f"stub at &FCCC (window {'up' if pi_after == 0 else 'absent'}): no helper is run")
+        check((m[0x22A], m[0x22B], m[0x204], m[0x205]) == (0xCC, 0xFC, 0xD8, 0xFC),
+              f"... INSV and IRQ1V point into the stub, got INSV &{m[0x22B]:02X}{m[0x22A]:02X} IRQ1V &{m[0x205]:02X}{m[0x204]:02X}")
+        check((m[STUBA + 0x0A], m[STUBA + 0x0B], m[STUBA + 0x0D], m[STUBA + 0x0E], m[STUBA + 0x2B], m[STUBA + 0x2C])
+              == (0x34, 0x12, 0x78, 0x56, 0x78, 0x56), "... the old vectors kept in the stub first")
+        ctl = [v for a_, v in r["writes"]]
+        check(ctl[:3] == [0x80 + 5, 0xE0 + 9, 0x10 + 7] and ctl[3:] == [0x21],
+              f"... the Pi told column, row, MODE (telnet), then the reset marker: got {[hex(v) for v in ctl]}")
+        ob = [o[0] for o in r["osbytes"]]
+        check(156 in ob and (3, 1, 0) in r["osbytes"], f"... the 6850 quietened and *FX3,1: {r['osbytes']}")
+        check(r["regs"] == (1, 9, 2) and r["sp_after"] == r["sp_before"], f"... registers and stack given back, got {r['regs']}")
+    # already hooked (a second reset with the vectors still in the stub): only the report
+    hooked = dict(stub)
+    hooked.update({0x22A: 0xCC, 0x22B: 0xFC, 0x204: 0xD8, 0x205: 0xFC, STUBA + 0x0A: 0x34, STUBA + 0x0B: 0x12})
+    r = call(rom, 1, 9, 2, pi_after=0, reset_type=0, pokes=hooked, watch=(STUBA + 0x28,))
+    m = r["mem"]._subject
+    check(m[STUBA + 0x0A] == 0x34 and (m[0x22A], m[0x22B]) == (0xCC, 0xFC) and [v for a_, v in r["writes"]][:3] == [0x85, 0xE9, 0x17],
+          "stub already hooked: the stashed vectors are not overwritten, and the Pi still gets the report")
+
     # 2. power-on: the Pi comes up while the ROM waits
     for after in (0, 1, 7, WAIT_TURNS - 1):
         r = call(rom, 1, 9, 2, pi_after=after, reset_type=1)
@@ -420,6 +453,36 @@ def main(path):
         r = run_remv(rom, 0, v, 0, 0x41, 0, pokes={0x247: fs, 0xEA: ea})
         check(r["mem"]._subject[0xEA] == want and r["y"] == 0x41 and r["a"] == 0x5A and r["sp_after"] == r["sp_before"],
               f"&247={fs} &EA={ea:#x} V={v}: &EA left {r['mem']._subject[0xEA]:#x}, want {want:#x}, the key and A kept")
+    # The vectors put back behind the Pi's back (a second processor's start, a Master's MOS) while
+    # the stub is in telnet mode (its LDX # at +15 is 0): a keyboard read hooks them in again, with
+    # the old ones kept, and *FX3 bit 0 set again; nothing is reported to the Pi.
+    ST = 0xFCCC
+    lost = {ST: 0xE0, ST + 1: 0x02, ST + 2: 0xD0, ST + 0x30: 0x60, ST + 0x15: 0xA2, ST + 0x16: 0x00,
+            0x22A: 0x43, 0x22B: 0xEA, 0x204: 0xFF, 0x205: 0xE5}
+    r = run_remv(rom, 0, 0, 0, 0x41, 0, hooked=False, pokes=lost)
+    m = r["mem"]._subject
+    check((m[0x22A], m[0x22B], m[0x204], m[0x205]) == (0xCC, 0xFC, 0xD8, 0xFC),
+          f"lost vectors are hooked in again on a keyboard read: INSV &{m[0x22B]:02X}{m[0x22A]:02X} IRQ1V &{m[0x205]:02X}{m[0x204]:02X}")
+    check((m[ST + 0x0A], m[ST + 0x0B], m[ST + 0x0D], m[ST + 0x0E]) == (0x43, 0xEA, 0xFF, 0xE5),
+          "... the MOS's vectors kept in the stub to chain to")
+    check(m[ST + 0x28] == 0 and r["y"] == 0x41 and r["a"] == 0x5A and r["x"] == 0 and r["sp_after"] == r["sp_before"],
+          "... nothing told to the Pi, and the key, A, X and the stack as they were")
+    off = dict(lost)
+    off[ST + 0x16] = 0x01                       # the modem's buffer: telnet is off (unhooked on purpose)
+    r = run_remv(rom, 0, 0, 0, 0x41, 0, hooked=False, pokes=off)
+    m = r["mem"]._subject
+    check((m[0x22A], m[0x22B]) == (0x43, 0xEA), "not in telnet mode: the vectors are left alone")
+    ours = dict(lost)
+    ours.update({0x22A: 0xCC, 0x22B: 0xFC, 0x204: 0xD8, 0x205: 0xFC, ST + 0x0A: 0x43, ST + 0x0B: 0xEA})
+    r = run_remv(rom, 0, 0, 0, 0x41, 0, hooked=False, pokes=ours)
+    m = r["mem"]._subject
+    check(m[ST + 0x0A] == 0x43 and r["calls"] == 0, "hooked in already: nothing done, no OS call (the stub never keeps itself)")
+    half = dict(lost)
+    half.update({0x22A: 0xCC, 0x22B: 0xFC, ST + 0x0A: 0x43, ST + 0x0B: 0xEA})      # INSV still ours, IRQ1V lost
+    r = run_remv(rom, 0, 0, 0, 0x41, 0, hooked=False, pokes=half)
+    m = r["mem"]._subject
+    check((m[ST + 0x0A], m[ST + 0x0B]) == (0x43, 0xEA) and (m[0x204], m[0x205]) == (0xD8, 0xFC),
+          "only IRQ1V lost: it is hooked in again and INSV's kept vector is not overwritten with the stub")
     for x in (1, 2, 3, 9):
         r = run_remv(rom, x, 0, 0, 0xFF, 0, screen=scr)
         check(r["y"] == 0xFF and r["c"] == 0 and r["pi"] == [] and r["old_calls"] == 1 and r["x"] == x,

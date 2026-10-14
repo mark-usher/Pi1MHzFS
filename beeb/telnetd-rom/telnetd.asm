@@ -52,7 +52,7 @@ CMDPTR = &F2                \ service call 4: the command line, and Y its offset
 HELPER_ENTRY = &FC88        \ the helper window: STX &FC88 / NOP / JMP &FD00
 HELPER_OPCODE = &8E         \ the Pi writes STX abs here, so it is there only if a Pi1MHz answers
 TELNET_HELPER = 20
-BUILD = 4                \ the build number in the version string, so *HELP says which image is fitted
+BUILD = 5             \ the build number in the version string, so *HELP says which image is fitted
 INSV = &022A                \ the MOS vectors: keyboard buffer insertion ...
 IRQ1V = &0204               \ ... and the interrupt
 REMV = &022C                \ buffer remove, vector 22: foreground code polls it while it waits for a key
@@ -60,6 +60,7 @@ EXTVEC = &0D9F              \ the extended vector table: 3 bytes per vector (add
 REMV_ENTRY = &FF42          \ the MOS's entry for vector 22 as an extended vector (&FF00 + 3*22)
 SCANKEY = &FF               \ the byte the Pi puts in the keyboard buffer to ask for the screen
 STUBPAGE = &FC              \ the stub's page (FRED); only a test build, in RAM, changes it
+STUB = &FCCC                \ the Pi's serial stub at its default place (src/serial_redirect.c)
 POWER_ON = 1                \ OSBYTE &FD: 0 soft BREAK, 1 power-on, 2 CTRL-BREAK
 WAIT_TURNS = 40             \ x about 0.16 s at 2 MHz: a little over 6 seconds
 
@@ -111,28 +112,31 @@ GUARD &C000
                 bne probe                   \ the Pi is already up
                 lda #WAIT_TURNS
                 pha                         \ turns left, on the stack: nothing else is ours
-.wait           lda HELPER_ENTRY
+.wait           jsr stubok
+                beq settle
+                lda HELPER_ENTRY
                 cmp #HELPER_OPCODE
                 beq ready
-                ldx #0                      \ about 0.16 s
-                ldy #0
-.spin           dey
-                bne spin
-                dex
-                bne spin
+                jsr pause
                 pla
                 sec
                 sbc #1
                 pha
                 bne wait
+                beq ready
+.settle         jsr pause                   \ the Pi is still setting the stub up: give it a moment
 .ready          pla                         \ the turns left
-.probe          lda HELPER_ENTRY            \ is there a Pi1MHz to answer?  It may have been
-                cmp #HELPER_OPCODE          \ moved, or the card have no 6502code.bin: then
-                bne nopi                    \ there is nothing to run
-                jsr unstale
+.probe          jsr unstale
+                jsr stubok                  \ the Pi's stub where it always is: hook it in here
+                bne viahelper
+                jsr install
+                jmp hooked
+.viahelper      lda HELPER_ENTRY            \ moved (Serial_addr=): helper 20 knows where.  No
+                cmp #HELPER_OPCODE          \ helper either (no 6502code.bin): nothing to hook
+                bne nopi
                 ldx #TELNET_HELPER
                 jsr HELPER_ENTRY            \ the helper hooks the vectors and sets *FX3,1
-                tsx
+.hooked         tsx
                 lda &102,x                  \ this ROM's slot, as the MOS gave it in X
                 jsr claimremv               \ A = what to tell the Pi: &21 if it can ask for the screen
                 jsr marker
@@ -165,6 +169,172 @@ GUARD &C000
                 lda &FC0E,x
                 sta IRQ1V+1
 .unsx           rts
+
+.pause          ldx #0                      \ about 0.16 s at 2 MHz
+                ldy #0
+.spin           dey
+                bne spin
+                dex
+                bne spin
+                rts
+
+\ Z set if the Pi's serial stub is at its usual place (&FCCC, Serial_addr's default):
+\ its first instructions, CPX #2 / BNE, and its last, RTS.  The Pi writes it when it
+\ starts, whether or not 6502code.bin (the helpers) is on the card.
+.stubok         lda STUB
+                cmp #&E0
+                bne stubx
+                lda STUB+1
+                cmp #2
+                bne stubx
+                lda STUB+2
+                cmp #&D0
+                bne stubx
+                lda STUB+&30
+                cmp #&60
+.stubx          rts
+
+\ What helper 20 does, done here, so a ROM in an EPROM needs nothing from the card:
+\ the keyboard insert vector and the interrupt vector into the stub (hookin), the Pi
+\ told the MODE and the cursor and "telnet" (&80+column, &E0+row, &10+MODE to its
+\ control port), the 6850 quiet (RTS high, no interrupts, its format and divider
+\ kept), and *FX3,1 so what is printed goes to RS423, which is the Pi.
+.install        jsr hookin
+                bcs instx
+                lda #135                    \ the MODE (Y) ...
+                jsr OSBYTE
+                tya
+                and #7
+                ora #&10
+                pha
+                lda #134                    \ ... and the cursor: X column, Y row
+                jsr OSBYTE
+                tya
+                ora #&E0
+                pha
+                txa
+                ora #&80
+                sta STUB+&28                \ &80 + column
+                pla
+                sta STUB+&28                \ &E0 + row
+                pla
+                sta STUB+&28                \ &10 + MODE: telnet mode, and the end of the report
+                lda #156
+                ldx #&40
+                ldy #&1F
+                jsr OSBYTE
+                lda #3
+                ldx #1
+                ldy #0
+                jsr OSBYTE
+                ldx #0                      \ the name, as the helper prints it
+.instnm         lda romtitle,x
+                beq instnl
+                jsr OSWRCH
+                inx
+                bne instnm
+.instnl         jsr OSNEWL
+.instx          rts
+
+\ The two vectors into the stub, each unless it is there already: the vector it replaces
+\ is kept in the stub first (nothing runs it until the vector moves), and a vector that
+\ is the stub's is never kept, or the stub would call itself.  C set (nothing done) if
+\ the interrupt vector is in FRED or JIM but not this stub: another program's hook.
+.hookin         lda IRQ1V+1
+                and #&FE
+                cmp #&FC
+                bne hook0
+                lda IRQ1V+1
+                cmp #>STUB
+                bne hookx
+                lda IRQ1V
+                cmp #<(STUB+&0C)
+                bne hookx
+.hook0          php
+                sei                         \ both vectors are used in interrupts
+                lda INSV+1
+                cmp #>STUB
+                bne hook1
+                lda INSV
+                cmp #<STUB
+                beq hook2
+.hook1          lda INSV
+                sta STUB+&0A
+                lda INSV+1
+                sta STUB+&0B
+                lda #<STUB
+                sta INSV
+                lda #>STUB
+                sta INSV+1
+.hook2          lda IRQ1V+1
+                cmp #>STUB
+                bne hook3
+                lda IRQ1V
+                cmp #<(STUB+&0C)
+                beq hook4
+.hook3          lda IRQ1V
+                sta STUB+&0D
+                sta STUB+&2B
+                lda IRQ1V+1
+                sta STUB+&0E
+                sta STUB+&2C
+                lda #<(STUB+&0C)
+                sta IRQ1V
+                lda #>STUB
+                sta IRQ1V+1
+.hook4          plp
+                clc
+                rts
+.hookx          sec
+                rts
+
+\ Hooked in again if something has put the vectors back behind the Pi's back - the second
+\ processor's start, a Master's MOS - while the Pi still has the stub in telnet mode (its
+\ LDX # at +15 says the keyboard buffer, 0).  Called on a read of the keyboard, which is
+\ in the foreground on the host whichever processor runs the program.  No report: the
+\ Pi's state has not changed, only the Beeb's vectors.  A, X and Y are kept.
+.rehook         pha
+                txa
+                pha
+                tya
+                pha
+                jsr stubok
+                bne rehx
+                lda STUB+&15
+                cmp #&A2                    \ LDX #
+                bne rehx
+                lda STUB+&16
+                bne rehx                    \ not telnet mode (unhooked on purpose, or the modem)
+                lda INSV+1
+                cmp #>STUB
+                bne reh1
+                lda INSV
+                cmp #<STUB
+                bne reh1
+                lda IRQ1V+1
+                cmp #>STUB
+                bne reh1
+                lda IRQ1V
+                cmp #<(STUB+&0C)
+                beq rehx
+.reh1           jsr hookin
+                bcs rehx
+                lda #236                    \ *FX3: what is printed still goes to RS423 (bit 0)?
+                ldx #0
+                ldy #&FF
+                jsr OSBYTE
+                txa
+                ora #1
+                tax
+                lda #3
+                ldy #0
+                jsr OSBYTE
+.rehx           pla
+                tay
+                pla
+                tax
+                pla
+                rts
 
 \ Tell the Pi this was a reset: its reset line is not touched by a software BREAK.
 \ The stub's control port is at +28, and INSV points at the stub once it is hooked in.
@@ -217,6 +387,7 @@ GUARD &C000
                 bne remvold
                 bvs remvold
                 jsr rfsdone
+                jsr rehook
                 plp
                 jsr remvcall
                 bcs remvret

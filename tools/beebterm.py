@@ -47,6 +47,7 @@ class Screen:
     def clear(self):
         self.grid = [[" "] * self.cols for _ in range(self.rows)]
         self.attr = [[(7, 0, False)] * self.cols for _ in range(self.rows)]
+        self.lattr = ["5"] * self.rows          # ESC # 3/4: the top/bottom of a double height line, 5: single
         self.r = self.c = 0
         self.top, self.bot = 0, self.rows - 1
 
@@ -77,7 +78,13 @@ class Screen:
         for ch in text:
             if self._esc is not None:
                 self._esc += ch
-                if len(self._esc) == 2 and ch != "[":
+                if len(self._esc) == 3 and self._esc[1] in "#(":   # ESC # n: line size (DECDHL/DECSWL); ESC ( x: charset
+                    if self._esc[1] == "#" and ch in "3456":
+                        self.lattr[self.r] = ch
+                    self._esc = None
+                elif len(self._esc) == 2 and ch in "#(":
+                    pass
+                elif len(self._esc) == 2 and ch != "[":
                     self._esc = None
                 elif len(self._esc) > 2 and "@" <= ch <= "~":
                     self._csi(self._esc[2:-1], ch)
