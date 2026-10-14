@@ -35,7 +35,10 @@
      telnetd_tek=1        draw the Beeb's graphics (VDU 25) in the terminal's Tektronix 4014
                           window when it says it is xterm (asked by CSI > q); 0: never
      telnetd_linemode=auto  screen or line mode from what the client answers (see below);
-                          on: always line mode, no negotiation sent; off: always screen mode
+                          shell: the same, but a terminal starts in shell mode; on: always
+                          line mode, no negotiation sent; off: always screen mode, no hot key
+     telnetd_teletext=rendered  MODE 7 codes in line and shell mode output: rendered (colours,
+                          mosaics) or markers (each code shown where it is); nc gets spaces
 
   Screen and line mode.  A terminal client (telnet, PuTTY) accepts the server's echo and
   gets screen mode: keys as they are typed, the Beeb's screen as ANSI.  A client that does
@@ -44,6 +47,11 @@
   IAC GA when the Beeb has gone quiet.  tnd_decide (telnetd_proto.c) has the rules; until
   they decide (at most TND_DECIDE_US) the session has only the negotiation, and the
   Beeb's output waits.
+
+  Shell mode is line mode for a terminal: the Pi edits the line (tnd_shell_*) and echoes
+  it, history and all.  A terminal session switches between screen and shell mode with
+  the hot key, Ctrl-\ then m (tnd_hotkey: Ctrl-\ t switches teletext rendered/markers,
+  Ctrl-\ twice sends a Ctrl-\).
 */
 #include <stdbool.h>
 #include <stdint.h>
@@ -65,7 +73,7 @@
 
 #define KRING_SIZE   4096u               /* power of two */
 #define KRING_MASK   (KRING_SIZE - 1u)
-#define OBUF_SIZE    4096u
+#define OBUF_SIZE    32768u               /* holds a shell mode redraw (TND_SH_CLI_MAX) with room to spare */
 /* Output is sent in batches: once OUT_BATCH bytes are waiting or the oldest has waited OUT_HOLD_US.
    A segment per main-loop pass, a few bytes each, is a Wi-Fi frame each, and the frames, not the
    bytes, are what the link runs out of (a stream from the Beeb reached the client at ~350 bytes/s). */
@@ -74,7 +82,7 @@
 #define LOGIN_MAX    32u
 #define LOGIN_US     60000000u           /* a session must be logged in by then */
 #define LOCKOUT_US   10000000u           /* after three wrong passwords */
-#define OUT_NEED     (TND_OUT_MAX > TND_LINE_OUT_MAX ? TND_OUT_MAX : TND_LINE_OUT_MAX)   /* room for one Beeb byte */
+#define OUT_NEED     TND_SH_CLI_MAX      /* room for one Beeb byte, in any mode */
 #define BEEB_PER_POLL 256u               /* Beeb bytes translated per main-loop pass */
 #define KEEPALIVE_US 30000000u           /* a telnet NOP this often when idle, see telnetd_poll */
 #define STALE_US     10000000u           /* a session that has not moved for this long, with
@@ -105,6 +113,10 @@ static uint32_t        g_banner_until;            /* banners are read until then
 static unsigned        g_repaint_row;
 static uint8_t         g_mode = 7u;           /* the Beeb's mode, until it is told otherwise */
 static uint8_t         g_setting = TND_SET_AUTO;   /* telnetd_linemode */
+#define SET_SHELL 3u                                   /* ... shell: as auto, a terminal starts in shell mode */
+static uint8_t         g_term_mode = TND_MODE_SCREEN;  /* what a terminal gets: screen or shell (the hot key) */
+static uint8_t         g_ttx = TND_TTX_RENDERED;       /* telnetd_teletext, and Ctrl-\ t */
+static bool            g_hot;                          /* Ctrl-\ pressed: the next key is for the daemon */
 static uint8_t         g_sm = TND_MODE_UNDECIDED;  /* the session's mode: screen, line or not yet known */
 
 static uint8_t   g_stage;
@@ -131,6 +143,8 @@ static u16_t     g_pqoff;                /* ... and how far into that segment */
 static tnd_in_t  g_in;
 static tnd_out_t g_out;
 static tnd_line_t g_lm;                /* line mode's translator: the model (g_out) follows the Beeb as well */
+static tnd_shell_t g_sh;                 /* shell mode's editor (and its own line translator) */
+static uint8_t   g_shcli[TND_SH_CLI_MAX], g_shkeys[TND_SH_KEYS_MAX];
 static uint8_t   g_kring[KRING_SIZE];    /* keys for the Beeb */
 static uint32_t  g_khead, g_ktail;
 static uint8_t   g_obuf[OBUF_SIZE];      /* bytes for the client */
@@ -191,6 +205,13 @@ static bool cfg_flag(const char *key, bool dflt)
    if (v == NULL || v[0] == '\0')
       return dflt;
    return !(v[0] == '0' || v[0] == 'n' || v[0] == 'N' || v[0] == 'f' || v[0] == 'F');
+}
+
+/* telnetd_teletext: rendered (the default) or markers. */
+static uint8_t cfg_ttx(void)
+{
+   const char *v = config_get("telnetd_teletext");
+   return (v != NULL && (v[0] == 'm' || v[0] == 'M')) ? TND_TTX_MARKERS : TND_TTX_RENDERED;
 }
 
 static bool login_required(void)
@@ -309,14 +330,69 @@ static void login_key(uint8_t k)
    ring - the Beeb may be busy in a loop with its keyboard buffer full of
    type-ahead, which is when it is wanted - and, as the Beeb's own ESCAPE does,
    it discards what was typed ahead. */
+static void session_enter(uint8_t m);
+
+/* What the shell editor asked for: bytes for the client, keys for the Beeb, ESCAPE. */
+static void sh_apply(tnd_sh_io_t *io)
+{
+   if (io->escape) {
+      g_khead = g_ktail;
+      serial_redirect_escape();
+   }
+   o_put(io->cli, io->ncli);
+   for (size_t i = 0u; i < io->nkeys; i++)
+      k_push(io->keys[i]);
+}
+
+static void sh_io(tnd_sh_io_t *io)
+{
+   io->cli = g_shcli;
+   io->ncli = 0u;
+   io->keys = g_shkeys;
+   io->nkeys = 0u;
+   io->escape = false;
+}
+
 static void deliver_key(uint8_t k)
 {
+   if (g_stage == S_LIVE && (g_sm == TND_MODE_SCREEN || g_sm == TND_MODE_SHELL)
+       && g_setting != TND_SET_SCREEN) {
+      switch (tnd_hotkey(&g_hot, k)) {          /* Ctrl-\ and a command */
+      case TND_HOT_NONE:
+         break;
+      case TND_HOT_MODE:
+         g_term_mode = (g_sm == TND_MODE_SCREEN) ? TND_MODE_SHELL : TND_MODE_SCREEN;
+         session_enter(g_term_mode);
+         return;
+      case TND_HOT_TTX:
+         g_ttx = (g_ttx == TND_TTX_RENDERED) ? TND_TTX_MARKERS : TND_TTX_RENDERED;
+         tnd_line_ttx(&g_sh.lm, g_ttx);
+         return;
+      case TND_HOT_LITERAL:
+         k = TND_HOT_KEY;                         /* Ctrl-\ twice: one for the Beeb */
+         if (g_sm == TND_MODE_SHELL) {
+            k_push(k);
+            return;
+         }
+         break;
+      default:
+         return;
+      }
+   }
+   if (g_stage == S_LIVE && g_sm == TND_MODE_SHELL && k != TND_KEY_BREAK) {
+      tnd_sh_io_t io;
+      sh_io(&io);
+      tnd_shell_key(&g_sh, k, Pi1MHz_now_us, &io);
+      sh_apply(&io);
+      return;
+   }
    if (g_stage != S_LIVE) {
       if (k != TND_KEY_ESCAPE && k != TND_KEY_BREAK && k != TND_KEY_REFRESH)
          login_key(k);
    } else if (k == TND_KEY_BREAK) {
       g_khead = g_ktail;                           /* what was typed ahead goes, as at a BREAK */
       tnd_line_escape(&g_lm);
+      tnd_line_escape(&g_sh.lm);
       g_break_asked = true;                        /* the next hook is the start of a new boot */
       serial_redirect_break();
    } else if (k == TND_KEY_REFRESH) {
@@ -416,7 +492,17 @@ static void beeb_follow(uint8_t c)
 static void beeb_byte(uint8_t c)
 {
    banner_byte(c);
-   if (g_sm == TND_MODE_LINE) {
+   if (g_sm == TND_MODE_SHELL) {
+      tnd_sh_io_t io;
+      if (g_ansi) {                             /* the model follows as well, for a switch to screen mode */
+         uint8_t m[TND_OUT_MAX];
+         (void)tnd_out_byte(&g_out, c, m);
+         tnd_out_touch(&g_out, Pi1MHz_now_us);
+      }
+      sh_io(&io);
+      tnd_shell_beeb(&g_sh, c, Pi1MHz_now_us, &io);
+      sh_apply(&io);
+   } else if (g_sm == TND_MODE_LINE) {
       uint8_t d[TND_LINE_OUT_MAX];
       size_t  n;
       if (g_ansi) {                             /* the model follows as well, for a switch to screen mode */
@@ -465,11 +551,20 @@ static void line_begin(void)
    g_repaint = false;
 }
 
-static void greet_text(bool screen)
+static void shell_begin(void)
 {
+   tnd_shell_reset(&g_sh, g_utf8, g_out.mode, g_ttx);
+   g_repaint = false;
+}
+
+static void greet_text(uint8_t m)
+{
+   bool screen = m == TND_MODE_SCREEN;
    if (screen && g_ansi && g_tek)
       o_str("\x1b[>q");                         /* XTVERSION: xterm answers, and can draw the Beeb's graphics */
-   o_str(screen ? "\r\nPi1MHz telnet - keyboard and screen\r\n" : "\r\nPi1MHz telnet - line mode\r\n");
+   o_str(screen ? "\r\nPi1MHz telnet - keyboard and screen\r\n"
+         : m == TND_MODE_SHELL ? "\r\nPi1MHz telnet - shell mode (Ctrl-\\ m: screen mode)\r\n"
+         : "\r\nPi1MHz telnet - line mode\r\n");
    {                                            /* what came up when the Beeb started: the banners, unless the screen shows them */
       unsigned first = 0u;
       while (first < g_banner_len && g_banner[first] != '\n')
@@ -500,25 +595,34 @@ static void session_enter(uint8_t m)
    uint8_t was = g_sm;
 
    g_sm = m;
+   g_in.edit_keys = (m == TND_MODE_SHELL);      /* Home and Delete for the editor */
+   g_hot = false;
    if (was == TND_MODE_UNDECIDED) {
       if (m == TND_MODE_SCREEN)
          screen_begin();
+      else if (m == TND_MODE_SHELL)
+         shell_begin();
       else
          line_begin();
-      greet_text(m == TND_MODE_SCREEN);
+      greet_text(m);
       return;
    }
    if (m == TND_MODE_SCREEN) {
-      o_str("\r\n");
+      o_str("\x1b[0m\r\n");
       screen_begin();
       if (g_ansi && g_tek)
          o_str("\x1b[>q");
    } else {
-      if (g_ansi)                               /* out of Tektronix mode, colours and cursor back */
+      if (g_ansi && was == TND_MODE_SCREEN)     /* out of Tektronix mode, colours and cursor back */
          o_str(g_out.tek_on ? "\x1b\x03\x1b[0m\x1b[?25h\r\n" : "\x1b[0m\x1b[?25h\r\n");
+      else
+         o_str("\x1b[0m\r\n");
       g_out.tek_on = false;
       g_scan_pending = false;
-      line_begin();
+      if (m == TND_MODE_SHELL)
+         shell_begin();                         /* a fresh line: the Beeb's prompt comes with the next RETURN */
+      else
+         line_begin();
    }
 }
 
@@ -528,7 +632,9 @@ static void session_decide(uint32_t now_us)
 
    if (g_pcb == NULL)
       return;
-   m = tnd_decide(&g_in, g_setting, now_us, g_start_us);
+   m = tnd_decide(&g_in, g_setting == SET_SHELL ? TND_SET_AUTO : g_setting, now_us, g_start_us);
+   if (m == TND_MODE_SCREEN)
+      m = g_term_mode;                          /* a terminal: screen or shell mode, as chosen */
    if (m != TND_MODE_UNDECIDED && m != g_sm)
       session_enter(m);
 }
@@ -545,8 +651,9 @@ static void pend_consume(void)
    while (g_pq != NULL && g_pcb != NULL) {
       const uint8_t *d = (const uint8_t *)g_pq->payload;
       while (g_pqoff < g_pq->len) {
-         if (KRING_SIZE - (g_ktail - g_khead) < TND_IN_KEYS)
-            goto full;                          /* a byte releases at most TND_IN_KEYS keys */
+         if (KRING_SIZE - (g_ktail - g_khead) < TND_IN_KEYS * TND_SH_KEYS_MAX
+             || o_room() < TND_SH_CLI_MAX + 8u)
+            goto full;                          /* a byte releases at most TND_IN_KEYS keys (a shell line, more) */
          client_byte(d[g_pqoff++], now);
          n++;
       }
@@ -677,6 +784,8 @@ static err_t td_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 
    tnd_in_reset(&g_in);
    g_sm = TND_MODE_UNDECIDED;
+   g_term_mode = (g_setting == SET_SHELL) ? TND_MODE_SHELL : TND_MODE_SCREEN;
+   g_ttx = cfg_ttx();
    if (g_setting == TND_SET_SCREEN) {           /* as it always was: the greeting at once */
       screen_begin();
       {
@@ -684,7 +793,7 @@ static err_t td_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
          o_put(g, tnd_greeting(g));
       }
       g_sm = TND_MODE_SCREEN;
-      greet_text(true);
+      greet_text(TND_MODE_SCREEN);
    } else if (g_setting == TND_SET_LINE) {      /* nothing offered: a raw client sees no negotiation */
       g_in.refuse_echo = true;
       g_in.echo_opt = g_in.sga_opt = TND_OPT_OFF;
@@ -868,6 +977,15 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
       }
    }
 
+   /* Shell mode: a probe or passthrough that has run its time, the edit line back
+      after the Beeb's output. */
+   if (g_sm == TND_MODE_SHELL && g_stage == S_LIVE && o_room() >= TND_SH_CLI_MAX + 4u) {
+      tnd_sh_io_t io;
+      sh_io(&io);
+      tnd_shell_tick(&g_sh, now_us, &io);
+      sh_apply(&io);
+   }
+
    if (g_repaint && g_stage == S_LIVE && g_pcb != NULL && o_room() >= TND_REPAINT_MAX + 2u) {
       uint8_t rb[TND_REPAINT_MAX];
       size_t  rn = tnd_out_repaint(&g_out, g_repaint_row, rb);
@@ -996,7 +1114,9 @@ void telnetd_init(void)
    {
       const char *lm = config_get("telnetd_linemode");   /* auto (the default), on / 1 / line, off / 0 / screen */
       g_setting = TND_SET_AUTO;
-      if (lm != NULL && lm[0] != '\0' && lm[0] != 'a' && lm[0] != 'A') {
+      if (lm != NULL && (lm[0] == 's' || lm[0] == 'S') && (lm[1] == 'h' || lm[1] == 'H')) {
+         g_setting = SET_SHELL;
+      } else if (lm != NULL && lm[0] != '\0' && lm[0] != 'a' && lm[0] != 'A') {
          bool on = lm[0] == '1' || lm[0] == 'y' || lm[0] == 'Y' || lm[0] == 'l' || lm[0] == 'L'
                    || ((lm[0] == 'o' || lm[0] == 'O') && (lm[1] == 'n' || lm[1] == 'N'));
          g_setting = on ? TND_SET_LINE : TND_SET_SCREEN;
@@ -1044,7 +1164,8 @@ void telnetd_status(char *buf, size_t len)
    if (g_pcb != NULL)
       snprintf(buf, len, "port %u, %s %s from %s, %lu sessions, %lu refused, %lu replaced, %lu dropped, last end: %s (%d); ring %lu, rx %s, rcvwnd %u, tcp state %d, sndq %u",
                (unsigned int)g_port, g_stage == S_LIVE ? "live" : "login",
-               g_sm == TND_MODE_LINE ? "line mode" : g_sm == TND_MODE_SCREEN ? "screen mode" : "deciding", g_peer,
+               g_sm == TND_MODE_LINE ? "line mode" : g_sm == TND_MODE_SCREEN ? "screen mode"
+               : g_sm == TND_MODE_SHELL ? "shell mode" : "deciding", g_peer,
                (unsigned long)g_sessions, (unsigned long)g_refused,
                (unsigned long)g_replaced, (unsigned long)g_dropped, g_why, g_why_err,
                (unsigned long)(g_ktail - g_khead), g_rx_blocked ? "refused" : "ok",
