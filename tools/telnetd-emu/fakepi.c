@@ -1,14 +1,15 @@
 /* fakepi.c - the network half of telnetd.c, without lwIP, for the emulator harness.
 
-   Built as a shared library (run.py builds it) from this file and the firmware's own
-   src/telnetd_proto.c, so what is tested is the daemon's byte logic itself.  This file
-   is only the glue telnetd.c has around it, kept in the same shape: one session, a key
-   ring, the mode decision after every client byte and on every poll, the Beeb's output
-   held while the mode is not decided, line mode keys paced by tnd_line_room and recorded
-   as typed when given to the Beeb, ESCAPE as a request (the harness raises it the way
-   the Pi does), IAC GA when tnd_line_ga_due and tnd_ga_wanted.  Screen mode goes through
-   tnd_out_byte, as in the daemon.  Not here: the login, the banners, the repaint, the
-   copy cursor, the ROM's screen scan. */
+   Built from this file and the firmware's own src/telnetd_proto.c, so what is tested is
+   the daemon's byte logic itself: as a shared library for run.py, or as a program on a
+   pipe for beebium_run.py (FAKEPI_MAIN).  This file is only the glue telnetd.c has
+   around it, kept in the same shape: one session, a key ring, the mode decision after
+   every client byte and on every poll, the Beeb's output held while the mode is not
+   decided, line mode keys paced by tnd_line_room and recorded as typed when given to the
+   Beeb, the shell editor's keys and output, the hot key (Ctrl-\ m, t, Ctrl-\), ESCAPE as
+   a request (the harness raises it the way the Pi does), IAC GA when tnd_line_ga_due and
+   tnd_ga_wanted.  Screen mode goes through tnd_out_byte, as in the daemon.  Not here:
+   the login, the banners, the repaint, the copy cursor, the ROM's screen scan. */
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -16,18 +17,22 @@
 #include "telnetd_proto.h"
 
 #define RING 4096u
-#define OUTB 65536u
+#define OUTB 262144u
+#define SET_SHELL 3u
 
-static tnd_in_t   g_in;
-static tnd_out_t  g_out;
-static tnd_line_t g_lm;
-static uint8_t    g_setting, g_sm;
-static uint32_t   g_start;
-static uint8_t    g_ring[RING];
-static uint32_t   g_kh, g_kt;
-static uint8_t    g_ob[OUTB];
-static uint32_t   g_on;
-static int        g_escape, g_break;
+static tnd_in_t    g_in;
+static tnd_out_t   g_out;
+static tnd_line_t  g_lm;
+static tnd_shell_t g_sh;
+static uint8_t     g_setting, g_sm, g_term, g_ttx;
+static bool        g_hot;
+static uint32_t    g_start;
+static uint8_t     g_ring[RING];
+static uint32_t    g_kh, g_kt;
+static uint8_t     g_ob[OUTB];
+static uint32_t    g_on;
+static int         g_escape, g_break;
+static uint8_t     g_shcli[TND_SH_CLI_MAX], g_shkeys[TND_SH_KEYS_MAX];
 
 static void o_put(const uint8_t *p, size_t n)
 {
@@ -37,29 +42,53 @@ static void o_put(const uint8_t *p, size_t n)
    g_on += (uint32_t)n;
 }
 
-static void decide(uint32_t now)
+static void o_str(const char *s)
 {
-   uint8_t m = tnd_decide(&g_in, g_setting, now, g_start);
-   if (m == TND_MODE_UNDECIDED || m == g_sm)
-      return;
-   if (g_sm == TND_MODE_SCREEN)                 /* a switch from screen: colours back, a new line */
-      o_put((const uint8_t *)"\x1b[0m\x1b[?25h\r\n", 12u);
-   else if (g_sm == TND_MODE_LINE)
-      o_put((const uint8_t *)"\r\n", 2u);
-   if (m == TND_MODE_LINE)
-      tnd_line_reset(&g_lm, true, g_out.mode);
-   else
-      tnd_out_session(&g_out);
-   g_sm = m;
+   o_put((const uint8_t *)s, strlen(s));
 }
 
-void fp_start(int setting, int beeb_mode, uint32_t now)
+static void k_push(uint8_t k)
+{
+   if (g_kt - g_kh < RING)
+      g_ring[g_kt++ % RING] = k;
+}
+
+static void enter(uint8_t m)
+{
+   uint8_t was = g_sm;
+
+   g_sm = m;
+   g_in.edit_keys = (m == TND_MODE_SHELL);
+   g_hot = false;
+   if (was != TND_MODE_UNDECIDED)
+      o_str("\x1b[0m\r\n");
+   if (m == TND_MODE_LINE)
+      tnd_line_reset(&g_lm, true, g_out.mode);
+   else if (m == TND_MODE_SHELL)
+      tnd_shell_reset(&g_sh, true, g_out.mode, g_ttx);
+   else
+      tnd_out_session(&g_out);
+}
+
+static void decide(uint32_t now)
+{
+   uint8_t m = tnd_decide(&g_in, g_setting == SET_SHELL ? TND_SET_AUTO : g_setting, now, g_start);
+   if (m == TND_MODE_SCREEN)
+      m = g_term;
+   if (m != TND_MODE_UNDECIDED && m != g_sm)
+      enter(m);
+}
+
+/* setting: 0 auto, 1 screen (off), 2 line (on), 3 shell; ttx: TND_TTX_*. */
+void fp_start(int setting, int beeb_mode, uint32_t now, int ttx)
 {
    tnd_in_reset(&g_in);
    tnd_out_reset(&g_out, true);
    tnd_out_assume_mode(&g_out, (uint8_t)beeb_mode);
    tnd_line_reset(&g_lm, true, (uint8_t)beeb_mode);
    g_setting = (uint8_t)setting;
+   g_term = (g_setting == SET_SHELL) ? TND_MODE_SHELL : TND_MODE_SCREEN;
+   g_ttx = (uint8_t)ttx;
    g_sm = TND_MODE_UNDECIDED;
    g_start = now;
    g_kh = g_kt = 0u;
@@ -75,8 +104,56 @@ void fp_start(int setting, int beeb_mode, uint32_t now)
    decide(now);
 }
 
-static void key(uint8_t k)
+static void sh_io(tnd_sh_io_t *io)
 {
+   io->cli = g_shcli; io->ncli = 0u;
+   io->keys = g_shkeys; io->nkeys = 0u;
+   io->escape = false;
+}
+
+static void sh_apply(tnd_sh_io_t *io)
+{
+   if (io->escape) {
+      g_kh = g_kt;
+      g_escape = 1;
+   }
+   o_put(io->cli, io->ncli);
+   for (size_t i = 0u; i < io->nkeys; i++)
+      k_push(io->keys[i]);
+}
+
+static void key(uint8_t k, uint32_t now)
+{
+   if ((g_sm == TND_MODE_SCREEN || g_sm == TND_MODE_SHELL) && g_setting != TND_SET_SCREEN) {
+      switch (tnd_hotkey(&g_hot, k)) {
+      case TND_HOT_NONE:
+         break;
+      case TND_HOT_MODE:
+         g_term = (g_sm == TND_MODE_SCREEN) ? TND_MODE_SHELL : TND_MODE_SCREEN;
+         enter(g_term);
+         return;
+      case TND_HOT_TTX:
+         g_ttx = (g_ttx == TND_TTX_RENDERED) ? TND_TTX_MARKERS : TND_TTX_RENDERED;
+         tnd_line_ttx(&g_sh.lm, g_ttx);
+         return;
+      case TND_HOT_LITERAL:
+         k = TND_HOT_KEY;
+         if (g_sm == TND_MODE_SHELL) {
+            k_push(k);
+            return;
+         }
+         break;
+      default:
+         return;
+      }
+   }
+   if (g_sm == TND_MODE_SHELL && k != TND_KEY_BREAK) {
+      tnd_sh_io_t io;
+      sh_io(&io);
+      tnd_shell_key(&g_sh, k, now, &io);
+      sh_apply(&io);
+      return;
+   }
    if (k == TND_KEY_ESCAPE) {
       g_kh = g_kt;
       g_escape = 1;
@@ -85,10 +162,11 @@ static void key(uint8_t k)
       g_kh = g_kt;
       g_break = 1;
       tnd_line_escape(&g_lm);
+      tnd_line_escape(&g_sh.lm);
    } else if (k == TND_KEY_REFRESH) {
       /* the ROM's screen scan: not in the harness */
-   } else if (g_kt - g_kh < RING) {
-      g_ring[g_kt++ % RING] = k;
+   } else {
+      k_push(k);
    }
 }
 
@@ -98,10 +176,10 @@ void fp_client(const uint8_t *p, int n, uint32_t now)
       uint8_t keys[TND_IN_KEYS], rep[TND_IN_REPLY];
       size_t  rl, nk = tnd_in_byte(&g_in, p[i], now, keys, rep, &rl);
       o_put(rep, rl);
-      if (g_setting == TND_SET_AUTO)
+      if (g_setting == TND_SET_AUTO || g_setting == SET_SHELL)
          decide(now);
       for (size_t j = 0; j < nk; j++)
-         key(keys[j]);
+         key(keys[j], now);
    }
 }
 
@@ -111,9 +189,17 @@ int fp_beeb(uint8_t c, uint32_t now)
    if (g_sm == TND_MODE_UNDECIDED)
       return 0;
    if (g_sm == TND_MODE_LINE) {
-      uint8_t d[TND_LINE_OUT_MAX], m[TND_OUT_MAX];
+      static uint8_t d[TND_LINE_OUT_MAX];
+      uint8_t m[TND_OUT_MAX];
       (void)tnd_out_byte(&g_out, c, m);         /* the model follows too, as in the daemon */
       o_put(d, tnd_line_beeb(&g_lm, c, now, d));
+   } else if (g_sm == TND_MODE_SHELL) {
+      uint8_t m[TND_OUT_MAX];
+      tnd_sh_io_t io;
+      (void)tnd_out_byte(&g_out, c, m);
+      sh_io(&io);
+      tnd_shell_beeb(&g_sh, c, now, &io);
+      sh_apply(&io);
    } else {
       uint8_t d[TND_OUT_MAX];
       o_put(d, tnd_out_byte(&g_out, c, d));
@@ -127,7 +213,7 @@ int fp_poll(uint32_t now, uint8_t *keys, int room)
 {
    int n = 0;
 
-   if (g_setting == TND_SET_AUTO)
+   if (g_setting == TND_SET_AUTO || g_setting == SET_SHELL)
       decide(now);
    if (g_sm == TND_MODE_UNDECIDED)
       return 0;
@@ -135,15 +221,20 @@ int fp_poll(uint32_t now, uint8_t *keys, int room)
       uint8_t k[TND_IN_KEYS];
       size_t  nk = tnd_in_tick(&g_in, now, k);
       for (size_t j = 0; j < nk; j++)
-         key(k[j]);
+         key(k[j], now);
    }
    if (g_sm == TND_MODE_LINE) {
-      uint8_t lb[TND_LINE_OUT_MAX];
+      static uint8_t lb[TND_LINE_OUT_MAX];
       o_put(lb, tnd_line_tick(&g_lm, now, lb));
       if (tnd_line_ga_due(&g_lm, now, g_kh != g_kt) && tnd_ga_wanted(&g_in))
          o_put((const uint8_t *)"\xff\xf9", 2u);
       if ((size_t)room > tnd_line_room(&g_lm))
          room = (int)tnd_line_room(&g_lm);
+   } else if (g_sm == TND_MODE_SHELL) {
+      tnd_sh_io_t io;
+      sh_io(&io);
+      tnd_shell_tick(&g_sh, now, &io);
+      sh_apply(&io);
    }
    while (n < room && g_kh != g_kt) {
       uint8_t k = g_ring[g_kh++ % RING];
@@ -171,7 +262,7 @@ int fp_keys(void)   { return (int)(g_kt - g_kh); }
 /* The same, as a program on a pipe, for a driver that cannot load a shared library
    built here (beebium_run.py: Windows Python, this built in WSL).  One command a line,
    one answer a line:
-      S <setting> <mode> <now>           start a session
+      S <setting> <mode> <now> <ttx>     start a session (setting 0 auto 1 screen 2 line 3 shell)
       C <now> <hex>                      bytes from the client
       P <now> <room> <hex>               the Beeb's output since the last poll, and the poll
    answer: <beeb bytes taken> <keys hex or -> <client bytes hex or -> <escape> <mode> <keys queued> */
@@ -211,8 +302,9 @@ int main(void)
       int   taken = 0, nk = 0;
       char *h = NULL;
 
-      if (line[0] == 'S' && sscanf(line + 1, "%lu %lu %lu", &a, &b, &now) == 3) {
-         fp_start((int)a, (int)b, (uint32_t)now);
+      unsigned long t = TND_TTX_RENDERED;
+      if (line[0] == 'S' && sscanf(line + 1, "%lu %lu %lu %lu", &a, &b, &now, &t) >= 3) {
+         fp_start((int)a, (int)b, (uint32_t)now, (int)t);
       } else if (line[0] == 'C' && sscanf(line + 1, "%lu %7s", &now, hex) >= 1) {
          h = strchr(line + 2, ' ');
          size_t n = h ? unhex(h + 1, data, sizeof data) : 0;

@@ -21,7 +21,12 @@ greeting; the decision (nc, a telnet client that refuses the echo, a terminal th
 accepts it, a late DO ECHO, the setting); `PRINT 2+2`; `*HELP`; `Mistake`; typing in
 a program, then `LIST` and `RUN`; Ctrl-C in a loop (`Escape at line 10`); VDU and
 teletext codes stripped; INPUT; GET; MODE; a burst of lines (a paste); and IAC GA.
-Each transcript is printed.
+Then shell mode, typed one key at a time as from a terminal and checked through a
+small terminal emulator (`Term`, what the user would see): a line, then a history
+recall edited with Left, Backspace and a new character and run again; a MODE 7
+program with codes typed through Ctrl-V, LISTed as markers and then rendered and
+RUN; a GET program taking single keys; Ctrl-C in a loop; and the hot key to screen
+mode and back. Each transcript is printed.
 
 ## Beebium (primary): `beebium_run.py`
 

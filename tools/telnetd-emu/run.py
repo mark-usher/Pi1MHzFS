@@ -31,8 +31,9 @@ from beeb import Beeb                          # noqa: E402
 from stub import Stub                          # noqa: E402
 
 SRC = os.path.normpath(os.path.join(HERE, "..", "..", "src"))
-SETTINGS = {"auto": 0, "screen": 1, "line": 2}
-MODES = {0: "deciding", 1: "screen", 2: "line"}
+SETTINGS = {"auto": 0, "screen": 1, "line": 2, "shell": 3}
+TTX = {"spaces": 0, "rendered": 1, "markers": 2}
+MODES = {0: "deciding", 1: "screen", 2: "line", 3: "shell"}
 OSWORD = 0xFFF1
 
 
@@ -51,7 +52,7 @@ def build_shim():
                            "-I" + SRC, "-o", out] + srcs)
     lib = ctypes.CDLL(out)
     u8p = ctypes.POINTER(ctypes.c_uint8)
-    lib.fp_start.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint32]
+    lib.fp_start.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint32, ctypes.c_int]
     lib.fp_client.argtypes = [u8p, ctypes.c_int, ctypes.c_uint32]
     lib.fp_beeb.argtypes = [ctypes.c_uint8, ctypes.c_uint32]
     lib.fp_poll.argtypes = [ctypes.c_uint32, u8p, ctypes.c_int]
@@ -122,8 +123,8 @@ class Rig:
             self.step()
 
     # ---- the client's side ----
-    def connect(self, setting="auto"):
-        self.lib.fp_start(SETTINGS[setting], 7, self.now)
+    def connect(self, setting="auto", ttx="rendered"):
+        self.lib.fp_start(SETTINGS[setting], 7, self.now, TTX[ttx])
         self.connected = True
         self.out = bytearray()
 
@@ -307,8 +308,191 @@ def scripted(r):
     got = r.transact("PRINT 1")
     ck.check(got == b"         1\r\n>", "and line mode works", got)
 
+    shell_checks(r, ck)
+
     print(f"{ck.n} checks, {ck.failed} failed; {r.seconds():.1f} s of Beeb time")
     return ck.failed == 0
+
+
+# ---- shell mode: a terminal, and what it would show ---------------------------------
+
+class Term:
+    """Just enough of a terminal to see what a user would: printable text, CR, LF, BS,
+    CSI n C / n D / K, SGR (ignored), BEL (counted).  UTF-8 decoded."""
+
+    def __init__(self):
+        self.rows = [[]]
+        self.r = 0
+        self.c = 0
+        self.bells = 0
+
+    def _put(self, ch):
+        row = self.rows[self.r]
+        while len(row) < self.c:
+            row.append(" ")
+        if self.c < len(row):
+            row[self.c] = ch
+        else:
+            row.append(ch)
+        self.c += 1
+
+    def feed(self, data):
+        text = bytes(data).replace(b"\xff\xf9", b"").decode("utf-8", "replace")
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            if ch == "\x1b" and i + 1 < len(text) and text[i + 1] == "[":
+                j = i + 2
+                while j < len(text) and not ("@" <= text[j] <= "~"):
+                    j += 1
+                params, final = text[i + 2:j], text[j] if j < len(text) else ""
+                n = int(params) if params.isdigit() else 1
+                if final == "D":
+                    self.c = max(0, self.c - n)
+                elif final == "C":
+                    self.c += n
+                elif final == "K":
+                    del self.rows[self.r][self.c:]
+                i = j + 1
+                continue
+            if ch == "\x1b":                         # ESC x (not CSI): skip both
+                i += 2
+                continue
+            if ch == "\r":
+                self.c = 0
+            elif ch == "\n":
+                self.r += 1
+                if self.r == len(self.rows):
+                    self.rows.append([])
+            elif ch == "\b":
+                self.c = max(0, self.c - 1)
+            elif ch == "\a":
+                self.bells += 1
+            elif ch >= " ":
+                self._put(ch)
+            i += 1
+
+    def lines(self):
+        return ["".join(r).rstrip() for r in self.rows]
+
+
+def term_keys(r, keys, gap_ms=40):
+    """Type keys one at a time, as a person at a terminal does."""
+    for k in keys:
+        r.send(k)
+        r.run_ms(gap_ms)
+
+
+def shell_session(r, ck, title):
+    """Connect as a terminal that accepts the echo, in shell mode."""
+    r.connect("shell")
+    r.send(b"\xff\xfd\x01\xff\xfd\x03\xff\xfb\x03")
+    r.wait_quiet()
+    print(f"--- {title}")
+    return len(r.out)
+
+
+def show_term(r, start):
+    t = Term()
+    t.feed(r.out[start:])
+    for line in t.lines():
+        print("  | " + line)
+    return t
+
+
+UP, LEFT, BS = "\x1b[A", "\x1b[D", "\x7f"
+HOT = "\x1c"
+
+
+def shell_checks(r, ck):
+    start = shell_session(r, ck, "shell mode: a line, history, an edit")
+    ck.check(r.mode() == "shell", "telnetd_linemode=shell, a terminal: shell mode")
+    term_keys(r, ["\r"])                        # the Beeb's prompt
+    r.wait_quiet()
+    term_keys(r, list("PRINT 2+2") + ["\r"])
+    r.wait_quiet()
+    term_keys(r, [UP, LEFT, BS, "*", "\r"])      # recall, edit 2+2 to 2*2, run
+    r.wait_quiet()
+    t = show_term(r, start)
+    lines = t.lines()
+    ck.check(">PRINT 2+2" in lines and "         4" in lines, "typed on the Pi's editor, shown once, the answer below", "\n".join(lines).encode())
+    ck.check(">PRINT 2*2" in lines and lines.count("         4") == 2, "Up, Left, Backspace, *, RETURN: the edited line runs", "\n".join(lines).encode())
+    ck.check(lines[-1] == ">" and sum(1 for l in lines if "PRINT 2+2" in l) == 1, "no echo twice, a prompt at the end", "\n".join(lines).encode())
+
+    # A MODE 7 program with codes typed through Ctrl-V, then LIST as markers and rendered.
+    start = len(r.out)
+    print("--- shell mode: teletext codes")
+    term_keys(r, list("NEW\r"))
+    r.wait_quiet()
+    term_keys(r, list('10 PRINT "') + ["\x16", "8", "1"] + list("RED") + ["\x16", "8", "2"] + list('GREEN"') + ["\r"])
+    r.wait_quiet()
+    term_keys(r, [HOT, "t"] + list("LIST\r"))   # markers
+    r.wait_quiet()
+    marked = bytes(r.out[start:])
+    show_term(r, start)
+    ck.check(b"\x1b[31m\xe2\x96\x88\x1b[39mRED\x1b[32m\xe2\x96\x88\x1b[39mGREEN" in marked,
+             "LIST with markers: a red and a green block where the codes are", marked)
+    t = Term(); t.feed(marked)
+    ck.check(any(l == '   10 PRINT "█RED█GREEN"' for l in t.lines()), "markers keep the columns", "\n".join(t.lines()).encode())
+    start = len(r.out)
+    term_keys(r, [HOT, "t"] + list("LIST\r"))   # rendered again
+    r.wait_quiet()
+    term_keys(r, list("RUN\r"))
+    r.wait_quiet()
+    rend = bytes(r.out[start:])
+    show_term(r, start)
+    ck.check(b"\x1b[0;31mRED" in rend and b"\x1b[0;32mGREEN" in rend, "rendered: the codes colour the text, in LIST and RUN", rend)
+    t = Term(); t.feed(rend)
+    ck.check(any(l == '   10 PRINT " RED GREEN"' for l in t.lines()) and any(l == " RED GREEN" for l in t.lines()),
+             "rendered: code cells are spaces", "\n".join(t.lines()).encode())
+
+    # GET: single keys reach the program.
+    start = len(r.out)
+    print("--- shell mode: GET")
+    term_keys(r, list('NEW\r'))
+    r.wait_quiet()
+    term_keys(r, list('10 A=GET:PRINT "GOT ";A:IF A<>81 GOTO 10\r'))
+    r.wait_quiet()
+    term_keys(r, list("RUN\r"))
+    r.wait_quiet()
+    term_keys(r, ["Y"], gap_ms=400)
+    term_keys(r, ["N"], gap_ms=400)
+    term_keys(r, ["Q"], gap_ms=400)
+    r.wait_quiet()
+    t = show_term(r, start)
+    text = "\n".join(t.lines())
+    ck.check("GOT 89" in text and "GOT 78" in text and "GOT 81" in text and t.lines()[-1] == ">",
+             "GET in shell mode: each key reaches the program", text.encode())
+
+    # Ctrl-C in a loop.
+    start = len(r.out)
+    term_keys(r, list("NEW\r"))
+    r.wait_quiet()
+    term_keys(r, list("10 GOTO 10\r") + list("RUN\r"))
+    r.run_ms(300)
+    term_keys(r, ["\x03"])
+    r.wait_quiet()
+    t = show_term(r, start)
+    ck.check(any("Escape at line 10" in l for l in t.lines()), "Ctrl-C in shell mode: Escape at line 10", "\n".join(t.lines()).encode())
+
+    # The hot key: to screen mode and back.
+    start = len(r.out)
+    print("--- the hot key")
+    term_keys(r, [HOT, "m"])
+    r.wait_quiet()
+    ck.check(r.mode() == "screen", "Ctrl-\\ m: screen mode")
+    term_keys(r, list("PRINT 7\r"))
+    r.wait_quiet()
+    scr = bytes(r.out[start:])
+    ck.check(b"PRINT 7" in scr and b"7" in scr, "screen mode: the Beeb's own echo", scr)
+    term_keys(r, [HOT, "m"])
+    r.wait_quiet()
+    ck.check(r.mode() == "shell", "Ctrl-\\ m again: shell mode")
+    start2 = len(r.out)
+    term_keys(r, ["\r"] + list("PRINT 8") + ["\r"])
+    r.wait_quiet()
+    t = show_term(r, start2)
+    ck.check(sum(1 for l in t.lines() if "PRINT 8" in l) == 1 and "         8" in t.lines(), "shell again: one echo, the answer", "\n".join(t.lines()).encode())
 
 
 def listen(roms, lib, port, setting):

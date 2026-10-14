@@ -261,8 +261,8 @@ class BeebiumRig:
         for _ in range(int(ms * 1000 / (SLICE_CYCLES / 2))):
             self.step()
 
-    def connect(self, setting="auto"):
-        _, _, out, _ = self.pi.call(f"S {harness.SETTINGS[setting]} 7 {self.now}")
+    def connect(self, setting="auto", ttx="rendered"):
+        _, _, out, _ = self.pi.call(f"S {harness.SETTINGS[setting]} 7 {self.now} {harness.TTX[ttx]}")
         self.connected = True
         self.out = bytearray(out)
 
@@ -326,6 +326,7 @@ def listen(r, port, setting):
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # the transcripts hold block characters
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--server", default=os.environ.get("BEEBIUM_SERVER", DEFAULT_SERVER))
     ap.add_argument("--preset", default="model-b")
