@@ -1091,7 +1091,10 @@ static size_t ttx_glyph(tnd_out_t *s, uint8_t c, uint8_t *dst)
       if (last > (int)end)
          end = (unsigned)last;
    }
-   n = ttx_cells(s, &s->tsgr, dst, s->cy, s->cx, end, TND_OUT_MAX - 160u, &done);
+   n = 0u;
+   if (b == 0x8Du || old == 0x8Du)              /* first: it leaves the cursor on this cell */
+      n += ttx_sync_lattr(s, dst, 200u);
+   n += ttx_cells(s, &s->tsgr, dst + n, s->cy, s->cx, end, TND_OUT_MAX - 160u - n, &done);
    if (done < end && s->origin_ok)
       mark_dirty(s, done + 1u, s->cy, end, s->cy);
    if (end > s->cx && s->cx < s->wr) {          /* back to the cell after this one */
@@ -1099,8 +1102,6 @@ static size_t ttx_glyph(tnd_out_t *s, uint8_t c, uint8_t *dst)
       n += put_num(dst + n, (unsigned)s->cx + 2u);
       dst[n++] = 'G';
    }
-   if (b == 0x8Du || old == 0x8Du)
-      n += ttx_sync_lattr(s, dst + n, TND_OUT_MAX - 60u - n);
    if (s->cx < s->wr)
       s->cx++;
    else

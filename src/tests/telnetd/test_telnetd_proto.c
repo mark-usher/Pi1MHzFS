@@ -763,6 +763,8 @@ static void test_output_teletext_chip(void)
       CHECK(blocks == 2, "hold graphics: the control code after a mosaic shows the mosaic again (%u blocks)", blocks);
    }
 
+   TTX("\x8d" "AB");
+   CHECK(strstr(out, "\x1b#3\x1b[1;1H AB") != NULL, "the double height code's own cell stays a space: the line attribute goes first"); if (!strstr(out, "\x1b#3\x1b[1;1H AB")) printf("    got [%s]\n", out);
    TTX("\x8d" "AB\r\n\x8d" "AB");
    CHECK(strstr(out, "\x1b[1;1H\x1b#3") != NULL && strstr(out, "\x1b[2;1H\x1b#4") != NULL,
          "double height: the first row is the top half, the next the bottom"); if (!strstr(out, "\x1b#4")) printf("    got [%s]\n", out);
