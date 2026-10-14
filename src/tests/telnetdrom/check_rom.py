@@ -200,7 +200,7 @@ def run_command(rom, line, mode=1, screen=None, cur=(3, 4), hooked=True, stream0
     return st
 
 
-def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a=0x5A, mode=1, win=None, pokes=None):
+def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a=0x5A, mode=1, win=None, pokes=None, flaky=None):
     """Call the REMV handler the way the MOS's extended vector entry does, with the MOS's own
     routine modelled by a stub that returns Y=old_y and C=old_c.  Returns what happened."""
     boot = call(rom, 1, 6, 0, pi_after=0, reset_type=2)
@@ -243,6 +243,9 @@ def run_remv(rom, x, v, c, old_y, old_c, screen=None, cur=(3, 4), hooked=True, a
             if mpu.a == 135:
                 mpu.x = screen.get((st["cx"], st["cy"]), 32)
                 mpu.y = mode
+                if flaky and flaky.get((st["cx"], st["cy"]), 0) > 0:     # a read that comes back unrecognised
+                    flaky[(st["cx"], st["cy"])] -= 1
+                    mpu.x = 0
             elif mpu.a == 134:
                 mpu.x, mpu.y = st["cx"] - mem._subject[0x308], st["cy"] - mem._subject[0x30B]
             elif mpu.a == 160:
@@ -452,6 +455,10 @@ def main(path):
     check(r["pi"][:2] == [26, 12] and 31 in r["pi"] and 0x41 in r["pi"] and 0x42 in r["pi"] and r["pi"][-3:] == [31, 3, 1],
           f"... and the screen is sent: CLS, the characters, the cursor back ({len(r['pi'])} bytes)")
     check(r["stream"] == 1 and (r["cx"], r["cy"]) == (3, 1) and r["sp_after"] == r["sp_before"], "... with the output streams and the cursor as they were, and the stack balanced")
+    fl = {(0, 0): 2, (5, 2): 9}
+    r = run_remv(rom, 0, 0, 0, 0xFF, 0, screen={(0, 0): 0x41, (5, 2): 0x42}, cur=(3, 1), flaky=fl)
+    check(0x41 in r["pi"] and 0x42 not in r["pi"] and r["sp_after"] == r["sp_before"],
+          "a cell read as nothing is read again (2 misses: sent; more than the tries: left out), stack balanced")
     r = run_remv(rom, 0, 1, 0, 0xFF, 0, screen=scr)
     check(r["y"] == 0xFF and r["c"] == 0 and r["pi"] == [] and r["old_calls"] == 1, "looking at the byte (V set) leaves it, and sends nothing")
     # A keyboard read gives the 6850 back from the ROM filing system (&EA = 1 with &247 = 2),
