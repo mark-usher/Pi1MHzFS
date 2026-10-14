@@ -34,6 +34,16 @@
      telnetd_copycursor=1 0: do not mark the copy cursor in the terminal
      telnetd_tek=1        draw the Beeb's graphics (VDU 25) in the terminal's Tektronix 4014
                           window when it says it is xterm (asked by CSI > q); 0: never
+     telnetd_linemode=auto  screen or line mode from what the client answers (see below);
+                          on: always line mode, no negotiation sent; off: always screen mode
+
+  Screen and line mode.  A terminal client (telnet, PuTTY) accepts the server's echo and
+  gets screen mode: keys as they are typed, the Beeb's screen as ANSI.  A client that does
+  not (nc, a script, a telnet client told "mode line") gets line mode: it sends whole
+  lines, and is sent what the Beeb prints as plain text without the echo of the line, and
+  IAC GA when the Beeb has gone quiet.  tnd_decide (telnetd_proto.c) has the rules; until
+  they decide (at most TND_DECIDE_US) the session has only the negotiation, and the
+  Beeb's output waits.
 */
 #include <stdbool.h>
 #include <stdint.h>
@@ -64,6 +74,7 @@
 #define LOGIN_MAX    32u
 #define LOGIN_US     60000000u           /* a session must be logged in by then */
 #define LOCKOUT_US   10000000u           /* after three wrong passwords */
+#define OUT_NEED     (TND_OUT_MAX > TND_LINE_OUT_MAX ? TND_OUT_MAX : TND_LINE_OUT_MAX)   /* room for one Beeb byte */
 #define BEEB_PER_POLL 256u               /* Beeb bytes translated per main-loop pass */
 #define KEEPALIVE_US 30000000u           /* a telnet NOP this often when idle, see telnetd_poll */
 #define STALE_US     10000000u           /* a session that has not moved for this long, with
@@ -93,6 +104,8 @@ static unsigned        g_bline_len;
 static uint32_t        g_banner_until;            /* banners are read until then */
 static unsigned        g_repaint_row;
 static uint8_t         g_mode = 7u;           /* the Beeb's mode, until it is told otherwise */
+static uint8_t         g_setting = TND_SET_AUTO;   /* telnetd_linemode */
+static uint8_t         g_sm = TND_MODE_UNDECIDED;  /* the session's mode: screen, line or not yet known */
 
 static uint8_t   g_stage;
 static uint32_t  g_start_us;
@@ -117,6 +130,7 @@ static u16_t     g_pqoff;                /* ... and how far into that segment */
 
 static tnd_in_t  g_in;
 static tnd_out_t g_out;
+static tnd_line_t g_lm;                /* line mode's translator: the model (g_out) follows the Beeb as well */
 static uint8_t   g_kring[KRING_SIZE];    /* keys for the Beeb */
 static uint32_t  g_khead, g_ktail;
 static uint8_t   g_obuf[OBUF_SIZE];      /* bytes for the client */
@@ -213,6 +227,7 @@ static void session_reset(void)
    g_att_known = false;
    g_rx_blocked = false;
    g_stage = S_LIVE;
+   g_sm = TND_MODE_UNDECIDED;
 }
 
 /* Something is waiting on the client: unacknowledged output, or its keys refused. */
@@ -277,15 +292,15 @@ static void login_key(uint8_t k)
    if (k == 127u) {
       if (g_len != 0u) {
          g_len--;
-         if (g_stage == S_LOGIN_USER)
+         if (g_stage == S_LOGIN_USER && g_sm != TND_MODE_LINE)
             o_put("\b \b", 3u);
       }
       return;
    }
    if (k >= 32u && k < 127u && g_len < LOGIN_MAX) {
       g_line[g_len++] = (char)k;
-      if (g_stage == S_LOGIN_USER)
-         o_put(&k, 1u);                         /* the password is not echoed */
+      if (g_stage == S_LOGIN_USER && g_sm != TND_MODE_LINE)
+         o_put(&k, 1u);                         /* the password is not echoed; in line mode the client echoes */
    }
 }
 
@@ -301,22 +316,26 @@ static void deliver_key(uint8_t k)
          login_key(k);
    } else if (k == TND_KEY_BREAK) {
       g_khead = g_ktail;                           /* what was typed ahead goes, as at a BREAK */
+      tnd_line_escape(&g_lm);
       g_break_asked = true;                        /* the next hook is the start of a new boot */
       serial_redirect_break();
    } else if (k == TND_KEY_REFRESH) {
-      if (serial_redirect_scan_ok())
+      if (g_sm == TND_MODE_SCREEN && serial_redirect_scan_ok())
          k_push(SCAN_KEY);                            /* the ROM keeps it from the program and sends the screen */
    } else if (k == TND_KEY_ESCAPE) {
       g_khead = g_ktail;
       serial_redirect_escape();
-      if (g_copy && g_ansi)
+      tnd_line_escape(&g_lm);                       /* line mode: the type-ahead's echo will not come */
+      if (g_copy && g_ansi && g_sm == TND_MODE_SCREEN)
          tnd_out_copykey(&g_out, 27u);
    } else {
       k_push(k);
-      if (g_copy && g_ansi && ((k >= 139u && k <= 143u) || k == 13u))
+      if (g_copy && g_ansi && g_sm == TND_MODE_SCREEN && ((k >= 139u && k <= 143u) || k == 13u))
          tnd_out_copykey(&g_out, k);               /* cursor keys, COPY, RETURN: the copy cursor */
    }
 }
+
+static void session_decide(uint32_t now_us);
 
 static void client_byte(uint8_t c, uint32_t now_us)
 {
@@ -326,6 +345,8 @@ static void client_byte(uint8_t c, uint32_t now_us)
 
    if (rl != 0u)
       o_put(rep, rl);
+   if (g_setting == TND_SET_AUTO)
+      session_decide(now_us);                   /* an answer, or the first data, can decide the mode */
    for (size_t i = 0u; i < n; i++)
       deliver_key(keys[i]);
 }
@@ -386,12 +407,27 @@ static void beeb_follow(uint8_t c)
       (void)tnd_out_byte(&g_out, c, d);
       tnd_out_touch(&g_out, Pi1MHz_now_us);
    }
+   if (g_pcb != NULL && g_sm == TND_MODE_LINE) {   /* a line mode login: its translator keeps up too */
+      uint8_t d[TND_LINE_OUT_MAX];
+      (void)tnd_line_beeb(&g_lm, c, Pi1MHz_now_us, d);
+   }
 }
 
 static void beeb_byte(uint8_t c)
 {
    banner_byte(c);
-   if (g_ansi) {
+   if (g_sm == TND_MODE_LINE) {
+      uint8_t d[TND_LINE_OUT_MAX];
+      size_t  n;
+      if (g_ansi) {                             /* the model follows as well, for a switch to screen mode */
+         uint8_t m[TND_OUT_MAX];
+         (void)tnd_out_byte(&g_out, c, m);
+         tnd_out_touch(&g_out, Pi1MHz_now_us);
+      }
+      n = tnd_line_beeb(&g_lm, c, Pi1MHz_now_us, d);
+      if (n != 0u)
+         o_put(d, n);
+   } else if (g_ansi) {
       uint8_t d[TND_OUT_MAX];
       size_t  n = tnd_out_byte(&g_out, c, d);
       tnd_out_touch(&g_out, Pi1MHz_now_us);
@@ -403,6 +439,98 @@ static void beeb_byte(uint8_t c)
    } else {
       o_put(&c, 1u);
    }
+}
+
+/* ---- the greeting, and the two modes ----------------------------------------- */
+
+/* A terminal that has just come is drawn from the model, or at least brought to the
+   colours the Beeb is in. */
+static void screen_begin(void)
+{
+   tnd_out_session(&g_out);                     /* the model has been following the Beeb all along */
+   tnd_out_tek(&g_out, false);                  /* until this terminal says it is xterm */
+   g_out.tek_on = false;
+   g_scan_pending = !g_out.sync || tnd_out_blank(&g_out);   /* a model that knows nothing: the ROM is asked for the Beeb's screen (below); one that does is drawn, with its colours */
+   g_repaint = g_ansi && g_out.sync;            /* ... so a terminal that has just come is drawn from it */
+   g_repaint_row = 0u;
+   if (g_ansi && !g_repaint) {                  /* ... or at least brought to the colours the Beeb is in */
+      uint8_t cb[16];
+      o_put(cb, tnd_out_colours(&g_out, cb));
+   }
+}
+
+static void line_begin(void)
+{
+   tnd_line_reset(&g_lm, g_utf8, g_out.mode);
+   g_repaint = false;
+}
+
+static void greet_text(bool screen)
+{
+   if (screen && g_ansi && g_tek)
+      o_str("\x1b[>q");                         /* XTVERSION: xterm answers, and can draw the Beeb's graphics */
+   o_str(screen ? "\r\nPi1MHz telnet - keyboard and screen\r\n" : "\r\nPi1MHz telnet - line mode\r\n");
+   {                                            /* what came up when the Beeb started: the banners, unless the screen shows them */
+      unsigned first = 0u;
+      while (first < g_banner_len && g_banner[first] != '\n')
+         first++;
+      if (g_banner_len != 0u && !(screen && g_ansi && tnd_out_has_line(&g_out, g_banner, first))) {
+         o_str("\r\n");
+         for (unsigned i = 0u; i < g_banner_len; i++) {
+            if (g_banner[i] == '\n')
+               o_str("\r\n");
+            else
+               o_put(&g_banner[i], 1u);
+         }
+         o_str("\r\n");                          /* and a gap before the screen */
+      }
+   }
+   if (login_required()) {
+      g_stage = S_LOGIN_USER;
+      o_str("\r\nlogin: ");
+   } else {
+      o_str("\r\n");
+   }
+}
+
+/* The session is now in mode m: its greeting, or a switch in mid-session (a late answer
+   to the negotiation, or the client changed its mind). */
+static void session_enter(uint8_t m)
+{
+   uint8_t was = g_sm;
+
+   g_sm = m;
+   if (was == TND_MODE_UNDECIDED) {
+      if (m == TND_MODE_SCREEN)
+         screen_begin();
+      else
+         line_begin();
+      greet_text(m == TND_MODE_SCREEN);
+      return;
+   }
+   if (m == TND_MODE_SCREEN) {
+      o_str("\r\n");
+      screen_begin();
+      if (g_ansi && g_tek)
+         o_str("\x1b[>q");
+   } else {
+      if (g_ansi)                               /* out of Tektronix mode, colours and cursor back */
+         o_str(g_out.tek_on ? "\x1b\x03\x1b[0m\x1b[?25h\r\n" : "\x1b[0m\x1b[?25h\r\n");
+      g_out.tek_on = false;
+      g_scan_pending = false;
+      line_begin();
+   }
+}
+
+static void session_decide(uint32_t now_us)
+{
+   uint8_t m;
+
+   if (g_pcb == NULL)
+      return;
+   m = tnd_decide(&g_in, g_setting, now_us, g_start_us);
+   if (m != TND_MODE_UNDECIDED && m != g_sm)
+      session_enter(m);
 }
 
 /* ---- lwIP callbacks ------------------------------------------------------- */
@@ -548,43 +676,22 @@ static err_t td_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
    tcp_err(newpcb, td_err);
 
    tnd_in_reset(&g_in);
-   tnd_out_session(&g_out);                     /* the model has been following the Beeb all along */
-   tnd_out_tek(&g_out, false);                  /* until this terminal says it is xterm */
-   g_out.tek_on = false;
-   g_scan_pending = !g_out.sync || tnd_out_blank(&g_out);   /* a model that knows nothing: the ROM is asked for the Beeb's screen (below); one that does is drawn, with its colours */
-   g_repaint = g_ansi && g_out.sync;            /* ... so a terminal that has just come is drawn from it */
-   g_repaint_row = 0u;
-   if (g_ansi && !g_repaint) {                  /* ... or at least brought to the colours the Beeb is in */
-      uint8_t cb[16];
-      o_put(cb, tnd_out_colours(&g_out, cb));
-   }
-   {
+   g_sm = TND_MODE_UNDECIDED;
+   if (g_setting == TND_SET_SCREEN) {           /* as it always was: the greeting at once */
+      screen_begin();
+      {
+         uint8_t g[TND_GREETING_LEN];
+         o_put(g, tnd_greeting(g));
+      }
+      g_sm = TND_MODE_SCREEN;
+      greet_text(true);
+   } else if (g_setting == TND_SET_LINE) {      /* nothing offered: a raw client sees no negotiation */
+      g_in.refuse_echo = true;
+      g_in.echo_opt = g_in.sga_opt = TND_OPT_OFF;
+      session_enter(TND_MODE_LINE);
+   } else {                                     /* the offer, and the mode waits for the answer */
       uint8_t g[TND_GREETING_LEN];
       o_put(g, tnd_greeting(g));
-   }
-   if (g_ansi && g_tek)
-      o_str("\x1b[>q");                         /* XTVERSION: xterm answers, and can draw the Beeb's graphics */
-   o_str("\r\nPi1MHz telnet - keyboard and screen\r\n");
-   {                                            /* what came up when the Beeb started: the banners, unless the screen shows them */
-      unsigned first = 0u;
-      while (first < g_banner_len && g_banner[first] != '\n')
-         first++;
-      if (g_banner_len != 0u && !(g_ansi && tnd_out_has_line(&g_out, g_banner, first))) {
-         o_str("\r\n");
-         for (unsigned i = 0u; i < g_banner_len; i++) {
-            if (g_banner[i] == '\n')
-               o_str("\r\n");
-            else
-               o_put(&g_banner[i], 1u);
-         }
-         o_str("\r\n");                          /* and a gap before the screen */
-      }
-   }
-   if (login_required()) {
-      g_stage = S_LOGIN_USER;
-      o_str("\r\nlogin: ");
-   } else {
-      o_str("\r\n");
    }
    return ERR_OK;
 }
@@ -680,14 +787,18 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
          g_banner_until = Pi1MHz_now_us + 4000000u;   /* ... and the next four seconds hold the new ones */
       }
    }
-   bool    live = g_pcb != NULL && g_stage == S_LIVE && !g_close_after;
+   if (g_setting == TND_SET_AUTO)
+      session_decide(now_us);                   /* the window for an answer has passed: line mode */
+   bool    deciding = g_pcb != NULL && g_sm == TND_MODE_UNDECIDED;
+   bool    live = g_pcb != NULL && g_stage == S_LIVE && !g_close_after && !deciding;
 
    /* What the Beeb printed.  With a client to show it to it is translated, and
       the rest waits in the Beeb's buffer while the output buffer is full;
-      with none (or before login) it is read and dropped. */
-   if (beeb_attached && !(g_repaint && g_stage == S_LIVE)) {
+      with none (or before login) it is read and dropped.  While the session's
+      mode is not known yet it waits too (TND_DECIDE_US at most). */
+   if (beeb_attached && !(g_repaint && g_stage == S_LIVE) && !deciding) {
       for (unsigned i = 0u; i < BEEB_PER_POLL; i++) {
-         if (live && o_room() < TND_OUT_MAX + 2u)
+         if (live && o_room() < OUT_NEED + 2u)
             break;
          if (serial_redirect_read(&c, 1u) == 0u)
             break;
@@ -700,7 +811,7 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
 
    if (g_pcb == NULL)
       return;
-   tnd_out_tek(&g_out, g_tek && g_ansi && g_in.xterm);   /* the terminal answered CSI > q as xterm */
+   tnd_out_tek(&g_out, g_tek && g_ansi && g_in.xterm && g_sm == TND_MODE_SCREEN);   /* the terminal answered CSI > q as xterm */
 
    if (g_stage != S_LIVE && (now_us - g_start_us) >= LOGIN_US) {
       o_str("\r\nLogin timed out\r\n");
@@ -723,9 +834,13 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
       An idle session is sent a telnet NOP (IAC NOP, which every client ignores)
       now and then: a client that is gone does not acknowledge it, and lwIP
       aborts the connection after its retransmissions. */
-   if (g_olen == g_opos && (now_us - g_tx_us) >= KEEPALIVE_US) {
+   if (g_olen == g_opos && (now_us - g_tx_us) >= KEEPALIVE_US && !deciding) {
       static const uint8_t nop[2] = { 255u, 241u };
-      o_put(nop, 2u);
+      static const uint8_t nul = 0u;
+      if (g_sm == TND_MODE_LINE && !g_in.telnet)
+         o_put(&nul, 1u);                       /* a raw client: a NUL, which a terminal ignores (IAC NOP would be junk) */
+      else
+         o_put(nop, 2u);
    }
 
    {
@@ -736,6 +851,22 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
 
    if (g_pend != NULL)
       pend_consume();                           /* client data waiting for room in the ring */
+
+   /* Line mode: an echo that stopped coming is given up, and the end of the Beeb's
+      output is marked with IAC GA for a client that wants it.  Keys still in the
+      ring hold it back; keys already given to the redirect count as typed, so the
+      Beeb must also have been quiet for TND_GA_US since the last of them went. */
+   if (g_sm == TND_MODE_LINE && g_stage == S_LIVE && o_room() >= TND_LINE_OUT_MAX + 4u) {
+      uint8_t lb[TND_LINE_OUT_MAX];
+      size_t  ln = tnd_line_tick(&g_lm, now_us, lb);
+      if (ln != 0u)
+         o_put(lb, ln);
+      if (tnd_line_ga_due(&g_lm, now_us, g_khead != g_ktail)
+          && tnd_ga_wanted(&g_in)) {
+         static const uint8_t ga[2] = { 255u, 249u };
+         o_put(ga, 2u);
+      }
+   }
 
    if (g_repaint && g_stage == S_LIVE && g_pcb != NULL && o_room() >= TND_REPAINT_MAX + 2u) {
       uint8_t rb[TND_REPAINT_MAX];
@@ -772,7 +903,7 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
          g_scan_pending = true;
       }
    }
-   if (g_scan_pending && g_stage == S_LIVE && !g_repaint && g_pcb != NULL && beeb_attached
+   if (g_scan_pending && g_stage == S_LIVE && g_sm == TND_MODE_SCREEN && !g_repaint && g_pcb != NULL && beeb_attached
        && serial_redirect_scan_ok() && g_khead == g_ktail) {
       g_scan_pending = false;
       k_push(SCAN_KEY);
@@ -780,7 +911,7 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
 
    /* A narrow text window that scrolled or was cleared is drawn again from the model,
       a row at a time, once the Beeb has nothing more to print for now. */
-   if (g_out.dirty && g_stage == S_LIVE && g_pcb != NULL && !g_repaint && !serial_redirect_pending()
+   if (g_out.dirty && g_stage == S_LIVE && g_sm == TND_MODE_SCREEN && g_pcb != NULL && !g_repaint && !serial_redirect_pending()
        && o_room() >= TND_REPAINT_MAX + 2u) {
       uint8_t db[TND_REPAINT_MAX];
       size_t  dn = tnd_out_dirty_row(&g_out, db);
@@ -790,7 +921,7 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
 
    /* The copy cursor's mark, once the Beeb has been quiet for a moment and has
       the keys. */
-   if (g_pcb != NULL && g_stage == S_LIVE && g_copy && g_ansi && g_khead == g_ktail
+   if (g_pcb != NULL && g_stage == S_LIVE && g_sm == TND_MODE_SCREEN && g_copy && g_ansi && g_khead == g_ktail
        && o_room() >= TND_COPY_MAX + 2u) {
       uint8_t cb[TND_COPY_MAX];
       size_t  cn = tnd_out_copyflush(&g_out, now_us, cb);
@@ -800,12 +931,16 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
 
    /* The keys, as far as the Beeb's keyboard buffer has room (the redirect's
       own FIFO, and behind it the stub's retry when the MOS buffer is full). */
-   if (beeb_attached && g_stage == S_LIVE) {
+   /* In line mode no more than the echo can be waited for (tnd_line_room): each key
+      given is remembered, so that its echo can be taken out. */
+   if (beeb_attached && g_stage == S_LIVE && !deciding) {
       while (g_khead != g_ktail) {
          size_t room = serial_redirect_room();
          uint32_t idx = g_khead & KRING_MASK;
          size_t chunk = g_ktail - g_khead;
          size_t n;
+         if (g_sm == TND_MODE_LINE && room > tnd_line_room(&g_lm))
+            room = tnd_line_room(&g_lm);
          if (room == 0u)
             break;
          if (chunk > KRING_SIZE - idx)
@@ -813,13 +948,17 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
          if (chunk > room)
             chunk = room;
          n = serial_redirect_write(&g_kring[idx], chunk);
+         if (g_sm == TND_MODE_LINE)
+            for (size_t i = 0u; i < n; i++)
+               if (g_kring[idx + i] != SCAN_KEY)
+                  tnd_line_typed(&g_lm, g_kring[idx + i], now_us);
          g_khead += (uint32_t)n;
          if (n < chunk)
             break;
       }
    }
 
-   if (g_stage == S_LIVE && !g_repaint && (!g_att_known || beeb_attached != g_att)) {
+   if (g_stage == S_LIVE && !g_repaint && !deciding && (!g_att_known || beeb_attached != g_att)) {
       o_str(beeb_attached
             ? "[BBC attached - press RETURN]\r\n"
             : "[BBC not attached: on the BBC type X%=20:CALL &FC88]\r\n");
@@ -854,6 +993,15 @@ void telnetd_init(void)
    g_utf8 = cfg_flag("telnetd_utf8", true);
    g_copy = cfg_flag("telnetd_copycursor", true);
    g_tek = cfg_flag("telnetd_tek", true);
+   {
+      const char *lm = config_get("telnetd_linemode");   /* auto (the default), on / 1 / line, off / 0 / screen */
+      g_setting = TND_SET_AUTO;
+      if (lm != NULL && lm[0] != '\0' && lm[0] != 'a' && lm[0] != 'A') {
+         bool on = lm[0] == '1' || lm[0] == 'y' || lm[0] == 'Y' || lm[0] == 'l' || lm[0] == 'L'
+                   || ((lm[0] == 'o' || lm[0] == 'O') && (lm[1] == 'n' || lm[1] == 'N'));
+         g_setting = on ? TND_SET_LINE : TND_SET_SCREEN;
+      }
+   }
    tnd_out_reset(&g_out, g_utf8);
    {
       const char *m = config_get("telnetd_mode");
@@ -894,8 +1042,9 @@ void telnetd_status(char *buf, size_t len)
       len -= used;
    }
    if (g_pcb != NULL)
-      snprintf(buf, len, "port %u, %s from %s, %lu sessions, %lu refused, %lu replaced, %lu dropped, last end: %s (%d); ring %lu, rx %s, rcvwnd %u, tcp state %d, sndq %u",
-               (unsigned int)g_port, g_stage == S_LIVE ? "live" : "login", g_peer,
+      snprintf(buf, len, "port %u, %s %s from %s, %lu sessions, %lu refused, %lu replaced, %lu dropped, last end: %s (%d); ring %lu, rx %s, rcvwnd %u, tcp state %d, sndq %u",
+               (unsigned int)g_port, g_stage == S_LIVE ? "live" : "login",
+               g_sm == TND_MODE_LINE ? "line mode" : g_sm == TND_MODE_SCREEN ? "screen mode" : "deciding", g_peer,
                (unsigned long)g_sessions, (unsigned long)g_refused,
                (unsigned long)g_replaced, (unsigned long)g_dropped, g_why, g_why_err,
                (unsigned long)(g_ktail - g_khead), g_rx_blocked ? "refused" : "ok",
