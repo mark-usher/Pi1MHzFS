@@ -7,9 +7,8 @@ PuTTY, a Linux or macOS terminal, Windows' telnet client, a script - can
 drive the Beeb from another room, and a program can drive it too.
 
 It is written to work on a BBC B, B+ and Master 128, with the real keyboard still
-working. It has been run on a Master 128 and, in the first sessions, on a machine
-recorded as a BBC B; it has not been run on a B+.
-beside it.
+working beside it. It has been run on a Master 128 and on a BBC Model B (MOS 1.20,
+the auto-start ROM in a flash ROM bank); it has not been run on a B+.
 
 ## Turning it on
 
@@ -22,7 +21,8 @@ beside it.
    WiFi has to be set up (see [WiFi setup](wifi.md)). Without the key, or with
    `0`, the daemon is off. `net_enable` is not needed.
 
-2. On the Beeb, run **helper 20**:
+2. On the Beeb, fit the **auto-start ROM** (below) and press BREAK - or run
+   **helper 20** by hand:
 
    ```
    X%=20:CALL &FC88
@@ -73,12 +73,27 @@ nothing shows on the Beeb:
 
 ### Surviving BREAK: the auto-start ROM
 
-`telnetd.rom` is a 16 KB sideways ROM, a few dozen bytes of code, that answers
-every reset by running helper 20. The image is `firmware/Pi1MHz/telnetd.rom`.
-Burn it into an EPROM, or put it on the SD card (`/Pi1MHz/telnetd.rom`) and load
-it into sideways RAM the way you load any ROM image, then press CTRL-BREAK. It
+`telnetd.rom` is a 16 KB sideways ROM, under a kilobyte of code, that hooks the
+daemon in on every reset. The image is `firmware/Pi1MHz/telnetd.rom`. Burn it into
+an EPROM or a flash ROM bank, or put it on the SD card (`/Pi1MHz/telnetd.rom`) and
+load it into sideways RAM the way you load any ROM image, then press CTRL-BREAK. It
 stays there across BREAK, and from then on every BREAK prints `TelnetD` and the
 session is back.
+
+- **It needs nothing from the SD card.** The ROM finds the Pi's serial stub at its
+  usual place (`&FCCC`) and hooks the Beeb's keyboard and RS423 output into it
+  itself, exactly as helper 20 does, so it works without the helper pages
+  (`6502code.bin`) and without paging anything into JIM. Only if `Serial_addr=` has
+  moved the stub does it run helper 20 instead, which knows where.
+- **`*HELP` shows which image is fitted**, as `TelnetD 0.2 b5` (the build number
+  goes up with every image).
+- **It claims nothing.** Every service call is passed on with A, X and Y as they
+  came, so it sits happily beside filing systems and other ROMs in any bank.
+- **It puts the hooks back if something else takes them.** If the keyboard insert
+  or interrupt vector is reset behind the Pi's back (a second processor starting
+  up, a Master's MOS) while the Pi still has the session, the next time anything
+  reads the keyboard the ROM hooks them in again. Unhooking on purpose (helper 20's
+  second entry) is left alone.
 
 **The ROM does not survive switching the Beeb off.** Ordinary sideways RAM is
 cleared when the power goes, so after a power-on the ROM is simply not there, and
@@ -87,15 +102,17 @@ power-on" below). What the ROM gives you is the daemon back after every BREAK an
 CTRL-BREAK for as long as the power stays on. If your sideways RAM is
 battery-backed, or the ROM is burnt into an EPROM, it is there at power-on too.
 
-**In an EPROM it is there at power-on.** The image, `firmware/Pi1MHz/telnetd.rom`,
-is exactly 16 KiB, so a 27C128 or compatible holds it, and it fits a ROM socket.
+**In an EPROM or flash bank it is there at power-on.** The image,
+`firmware/Pi1MHz/telnetd.rom`, is exactly 16 KiB, so a 27C128 or compatible holds it,
+and it fits a ROM socket. On the Model B bench it lives in a flash ROM bank, and three
+power cycles in a row each hooked the Pi in with nothing typed.
 A ROM that is present at power-on answers the Beeb's first reset call, before the
 Beeb tries its boot disc, and because it waits for the Pi (above) it holds the
 whole boot until the Pi is up, which should also give the Pi's emulated hard disc
 time to be ready before ADFS looks for it. **That last effect is expected, not yet
 measured:** without the ROM, a power-on boot from a Pi-served disc was seen to fail
 about as often as it worked (below). Read the chip back after programming; the
-image's MD5 is `2B0722122006BCCBE7F730D702A2E82F`.
+image's MD5 (build 5) is `1E4827D53E8282AFBDBC89F57CED6BE8`.
 
 **On a Master 128 also `*INSERT` the bank** (`*ROMS` shows which one `TelnetD`
 went into): the Master only starts ROMs marked as inserted, and a ROM loaded after
@@ -141,10 +158,9 @@ The Beeb's output is its VDU stream, and the daemon turns it into ANSI for
 your terminal: `CLS` and `MODE` clear the screen, `TAB(x,y)` (VDU 31)
 positions the cursor, `COLOUR` sets the text and background colours, and DELETE
 rubs out a character. The parameter bytes of the VDU codes a terminal cannot
-show (graphics, palette, VDU 23) are swallowed, so they do not print as
-rubbish. In Mode 7 the teletext colour codes become colours, and a colour is
-reset at the end of each line; in the other modes `COLOUR` stays set from line
-to line, as on the Beeb. The colour numbers are the mode's own: in MODE 1 and 5
+show (palette, VDU 23) are swallowed, so they do not print as rubbish. In the
+modes other than 7 `COLOUR` stays set from line to line, as on the Beeb. The
+colour numbers are the mode's own: in MODE 1 and 5
 `COLOUR 1`, `2` and `3` are red, yellow and white, in the two-colour modes `1` is
 white, and `VDU 19` changes them, as it does on the Beeb. Text already printed
 keeps the colour it was drawn in, which a terminal cannot change afterwards.
@@ -153,9 +169,46 @@ continues in the colour the Beeb has set, so a terminal that connects is told
 that colour before anything else. `VDU 23,1,0` and `VDU 23,1,1` hide and show
 the terminal's cursor as they do the Beeb's. A pound sign comes out as UTF-8.
 
-It is text only: what a program draws with graphics or by writing straight to
-screen memory does not appear. The window of the terminal should be at least
-as large as the Beeb's screen for the positioning to look right.
+What a program writes straight to screen memory does not appear, since the Pi
+only sees what goes through the MOS. The window of the terminal should be at
+least as large as the Beeb's screen for the positioning to look right.
+
+### MODE 7: teletext as the chip draws it
+
+In MODE 7 each row of the screen is drawn the way the Beeb's teletext chip (the
+SAA5050) draws it, from the left: a row starts white on black, and a control code
+changes the cells after it (or, for some, from its own cell). So you see:
+
+- **the colours**: alphanumeric and graphics colours, new background and black
+  background, flash (as the terminal's blink) and conceal;
+- **the graphics**: each mosaic character as its block of six cells, using
+  Unicode's "sextant" characters, contiguous and separated alike, with hold
+  graphics;
+- **the chip's own characters**: where the BBC has `£ ← ½ → ↑ # ― ¼ ‖ ¾ ÷` and a
+  solid block instead of some ASCII ones, you see those;
+- **double height**: a row with a double height code is drawn as a double height
+  line (the terminal's DECDHL), the first of a pair as the top half and the next as
+  the bottom, as the Beeb pairs them. On a double height line the terminal also
+  doubles the width, so that row is twice as wide as the others.
+
+A control code typed or printed in front of text that is already there changes how
+that text looks, just as on the Beeb. `COLOUR` does nothing in MODE 7, as on the
+Beeb. The sextants need a font with Unicode's "Symbols for Legacy Computing"
+(Cascadia Code, Windows Terminal's font, has them); a terminal that is not using UTF-8
+(`telnetd_utf8=0`) gets the Latin-1 or nearest ASCII character instead, and `#`
+for a mosaic.
+
+### Graphics: xterm's Tektronix window
+
+MOVE, DRAW and PLOT (`VDU 25`) cannot be shown as text, but xterm still has the
+Tektronix 4014 graphics terminal it grew out of. When a session starts the daemon
+asks the terminal what it is (`CSI > q`); if it answers that it is xterm, the
+Beeb's graphics are drawn in xterm's Tek window: lines, points, triangles and the
+Master's rectangles (outlined), with `VDU 29` moving the origin and `CLG` and
+`MODE` clearing the page. The Beeb's 1280 x 1024 is mapped onto the Tek's
+1024 x 780. A storage tube cannot rub out, so drawing in the background colour
+or inverting only moves the graphics cursor. Text goes back to xterm's text
+window. Nothing changes for any other terminal, and `telnetd_tek=0` turns it off.
 
 ### The daemon keeps a picture of the Beeb's text screen
 
@@ -247,6 +300,45 @@ about).
 - **Keys wait for the Beeb.** The Beeb's keyboard buffer holds 32 characters. A
   paste is fed in as the Beeb takes it, so a long paste while a program is
   not reading the keyboard simply waits.
+- **How fast it goes.** The Beeb prints into the Pi at about 1,900 characters a
+  second when it does nothing else (a teletext animation that prints 284
+  characters a frame ran at about 6.7 frames a second), and the Pi passes that
+  on to the client in full; output reaches the client in batches of up to a
+  kilobyte or eight thousandths of a second, too short to notice when typing.
+- **The ROM filing system and the cassette.** While `*ROM` or `*TAPE` reads,
+  the MOS sends nothing to RS423, so what `*CAT` and `*.` print is on the
+  Beeb's screen only. With the auto-start ROM fitted the Pi is told, and draws
+  the screen again (as F11 does) once the operation is over. MOS 1.20 also never
+  gives RS423 back after a ROM filing system operation; the ROM does, the next
+  time something reads the keyboard.
+
+## With a second processor
+
+A 6502 (or other) second processor runs the program, and the BBC itself - the
+"host" - runs the MOS, the screen and the keyboard. Everything the daemon uses is on
+the host, so it works with a second processor on:
+
+- **Use the auto-start ROM.** Sideways ROMs always run on the host, so the ROM
+  hooks the daemon in at every BREAK whatever processor is running the language.
+  `X%=20:CALL &FC88` typed into BASIC on a second processor runs on the second
+  processor, which cannot see the 1MHz bus: it does nothing. By hand, use
+  `*FX147,136,20` then `*GOIO FD00` (the OSBYTE crosses to the host, and `*GOIO`
+  runs the helper there).
+- **Output and keys go through the host's MOS** as they always do with a second
+  processor: what the program prints reaches the host's OSWRCH and is copied to
+  the Pi, and what you type goes into the host's keyboard buffer.
+- **The screen read (F11) runs on the host**, inside the host's keyboard read, so
+  it works whichever processor runs the program.
+- **If the second processor's start-up puts the host's vectors back** after the
+  ROM has hooked them, the ROM hooks them in again the next time the keyboard is
+  read (see the auto-start ROM above).
+- **Not covered:** a program on the second processor that draws by writing to
+  the host's screen memory across the Tube, as a host program writing to the
+  screen directly, is not seen.
+
+This has been run in the b-em emulator with a 6502 second processor on a BBC B
+and a Master 128; **it has not yet been run with a second processor on a real
+machine since the ROM began hooking the stub in itself.**
 
 ## RS423
 
@@ -337,6 +429,7 @@ password set the daemon lets anyone on the network type on your Beeb.
 | `telnetd_utf8` | `1` | The pound sign as UTF-8; `0` sends it as Latin-1. |
 | `telnetd_mode` | `7` | The Beeb's screen mode (0-7) until it sends a `MODE`. Its size cannot be read, and the daemon needs it to follow the text. |
 | `telnetd_copycursor` | `1` | `0` does not mark the copy cursor in the terminal. |
+| `telnetd_tek` | `1` | Draw the Beeb's graphics in xterm's Tektronix window when the terminal says it is xterm; `0`: never. |
 
 `/status` on the web interface has a **Telnetd** row (the port, whether a
 session is live, who from) and the **Serial** row says `hooked (telnet)`

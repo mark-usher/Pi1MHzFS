@@ -1,6 +1,11 @@
 # Telnet daemon - design record
 
-> **STATUS 2026-10-13: built, host-tested, and run on hardware with a Pi Zero W
+> **STATUS 2026-10-14: built, host-tested (206,751 translator checks, 179 ROM
+> checks), and run on a BBC Model B with the auto-start ROM build 5 in a flash bank:
+> every hardware QA suite passes (section 15). Second processor on real hardware,
+> graphics in a real xterm and a B+ are still to do.**
+>
+> **Earlier STATUS 2026-10-13: built, host-tested, and run on hardware with a Pi Zero W
 > (debug kernel). The machine the early runs used was recorded as a BBC B and is
 > not confirmed: the later runs were on a Master 128 (see section 12).** The byte translators (`src/telnetd_proto.c`) have 206,188
 > host checks (`src/tests/telnetd`), the firmware builds warning-free for `rpi`
@@ -141,12 +146,11 @@ back to the RS423 default.
   key gets the condition from telnet, not the character 27. The stub cannot read
   `*FX229` (&0275) in its four spare bytes.
 - **BREAK drops the hooks.** Helper 20 must be run again, unless the auto-start
-  ROM is loaded (section 8). The 1MHz-WiFi ROM could have done the same from its
-  own service call 1, but it is a separate project with its own licence, so it
-  is untouched.
-- Not tried on a Master 128. Nothing in helper 20 is B-specific; the stub was
-  hardware-tested on a Master with the modem (`serial-modem-plan.md`).
-- Text only: graphics and direct screen writes do not reach the terminal.
+  ROM is loaded (section 8; since build 5 it hooks the stub in itself, section 15).
+  The 1MHz-WiFi ROM could have done the same from its own service call 1, but it is
+  a separate project with its own licence, so it is untouched.
+- Direct screen writes do not reach the terminal. Graphics (VDU 25) reach an xterm,
+  in its Tektronix window (section 15); other terminals get none.
 
 ## 6. Tests
 
@@ -549,3 +553,125 @@ owning the 6850 (&EA = 1, set at &FB3D for each cassette or ROMFS operation):
   first `*CAT`. The ROM's REMV handler, on a keyboard read (never inside an
   operation, each of which takes the 6850 again), sets &EA back to 0 when
   &247 = 2 (ROMFS). The cassette's is left alone, a tape may still be running.
+
+## 15. The Model B bench, ROM builds 3 to 5, teletext and graphics (2026-10-14)
+
+Run on a BBC Model B (MOS 1.20, DFS 2.26, ADFS 1.30, a 63 MB Pi-served ADFS hard
+disc) with the auto-start ROM in a BooBip flash ROM bank, written from ADFS with a
+small flasher. The bench's power goes through a Home Assistant plug, so power-on
+is tested for real. The checks were done through a telnet session from the PC with
+an xterm emulator that keeps the screen as a terminal would, against the Beeb's own
+screen in two ways: the ROM's screen read (F11 must redraw exactly what the
+terminal shows, cursor included) and an OBS capture of the video output.
+
+**The ROM, builds 3 to 5.** Build 3 added `*HELP` with a build number, so an image
+on a machine is identified without a checksum. Build 4 is the ROM filing system
+work below. Build 5 hooks the stub in itself: when the stub's signature is at
+`&FCCC` (`CPX #2 / BNE` at the start, `RTS` at +&30; the Pi writes it whether or
+not `6502code.bin` loads) it does what helper 20 does - INSV and IRQ1V into the
+stub, the old vectors kept in it first, the MODE and cursor report, `OSBYTE 156`
+to quieten the 6850, `*FX3,1`, and prints `TelnetD` - and only falls back to helper
+20 when `Serial_addr=` has moved the stub. At power-on it waits for either the stub
+or the helper window. It also hooks the vectors in again (silently: the Pi's state
+has not changed) on a keyboard read through REMV, if the stub is in telnet mode
+(its `LDX #` operand at +&16 is 0) and either vector no longer points at it: the
+"vectors reset without a BREAK" of section 12, and whatever a second processor's
+start-up does, are then repaired the next time anything reads the keyboard. A
+vector already pointing at the stub is never stashed, or the stub would chain to
+itself. Every service call goes back with A, X and Y untouched; none is claimed
+(checked against the sideways ROM authoring notes' rules). 179 py65 checks.
+
+**`*ROM` hung with the Pi present.** RTool's ROM filing system catalogue, `*ROM`
+then `*.`, looped until ESCAPE whenever the stub was hooked in. Three MOS 1.20
+behaviours, none of which b-em shows (it asserts the 6850's CTS):
+
+1. Each character sent to RS423 finds buffer 2 empty (the stub takes everything)
+   and so clears bit 7 of `&24F` and enables the 6850's transmit interrupt
+   (`&E0E8` -> `&E170`); only that interrupt sets the bit again, and with nothing
+   on the RS423 port CTS is high and it never comes. The cassette and ROM filing
+   systems wait for the bit (`&FB1A`). Fixed in the Pi (the idle trip, above).
+2. While the cassette or ROM filing system owns the 6850 (`&EA` = 1), OSWRCH sends
+   nothing to RS423 (`&E0DC`): `*.` showed on the Beeb only. The ROM passes
+   service call `&0D` on and writes `&22` to the stub's control port; the Pi asks
+   for the screen once the reports stop (100 ms).
+3. MOS 1.20 never sets `&EA` back after a ROM filing system operation, and
+   selecting another filing system does not either, so the telnet session went
+   silent for good after the first `*CAT`. The ROM's REMV handler clears a leftover
+   `&EA` = 1 on a keyboard read when `&247` = 2 (the ROM filing system); the
+   cassette's is left alone.
+
+Ruled out on the way, for the record: the REMV claim (restored, still hung), the
+stub (unhooked, still hung - `&24F` stayed 0, which is why), ROM priority and
+bank, the ROM header, the speech flag `&27B`, and the 6850 control copy `&250`.
+
+**Teletext as the chip draws it.** In MODE 7, once the cursor is known, each model
+cell holds the byte the screen holds (`#`, `_` and the pound swapped as the MOS
+stores them) and is drawn from the state of the row to its left, per the SAA5050:
+set-at and set-after codes, colours, new and black background, flash (SGR 5),
+conceal, contiguous and separated graphics, hold graphics, mosaics as Unicode's
+sextants (U+1FB00 block, with U+258C, U+2590 and U+2588 for the three that
+Unicode already had), the chip's own characters, and double height as DECDHL
+(`ESC #3` / `ESC #4`), a pair at a time as the Beeb pairs them, kept in step through
+scrolls and cleared (`ESC #5`) before a clear or a MODE. A character is one cell;
+a control code, or a cell that held one, or any change in a row with hold
+graphics, redraws the rest of the row as far as it shows anything. The terminal's
+colours are followed exactly, so a cell sends SGR only when they change, and the
+terminal is plain before anything that fills with the background (a clear, a
+scroll). COLOUR does nothing in a known MODE 7. `TND_OUT_MAX` is 640 and
+`TND_REPAINT_MAX` 900 to hold a redrawn row; a 200,000-byte MODE 7 fuzz holds the
+bound.
+
+**Graphics in xterm's Tektronix window.** The daemon sends `CSI > q` (XTVERSION)
+at the start of a session; the input translator takes a DCS that starts `>|` as
+the answer (so Alt-P, which is also `ESC P`, still types) and notes `|XTerm(`. Then
+VDU 25 draws in xterm's Tek 4014 mode (`CSI ? 38 h`; GS vectors; `ESC FF` for CLG
+and MODE; `ESC ETX` back to the text screen before anything else): lines of every
+kind, points, triangles and the Master's rectangles outlined, VDU 29's origin, the
+Beeb's 1280 x 1024 onto the Tek's 1024 x 780, background and inverting draws only
+moving (a storage tube cannot erase). `telnetd_tek=0` turns it off. Host-tested;
+**not yet seen in a real xterm.**
+
+**Throughput.** A stream from the Beeb reached the client at about 350 bytes a
+second: `pump()` handed TCP whatever had collected on each main-loop pass, a few
+bytes, which is a Wi-Fi frame each. Output is now handed over at 1 KB or after
+8 ms; the client then gets everything the Beeb sends. The Beeb itself, printing
+through the hooked MOS, manages about 1,900 characters a second whether or not a
+client is connected (the Pi's `tx` counter over ten seconds).
+
+**A second processor (assessment; not run on the Model B).** Everything the daemon
+needs runs on the host: the ROM's service calls, its REMV handler and screen read,
+the stub's INSV and IRQ1V hooks. Parasite output and input go through the host's
+MOS (OSWRCH, the keyboard buffer), so they are copied and fed as usual. The weak
+points were the helper route (`CALL &FC88` from a parasite's BASIC runs on the
+parasite; the user guide gives `*FX147,136,20` / `*GOIO FD00`, as the other guides
+do) and the hooks being lost to the second processor's start-up, which comes after
+service call 1 - now repaired by build 5 on the next keyboard read. b-em, earlier,
+ran the screen read with a 6502 second processor on a B and a Master; the real
+hardware run is still to do. The repository's other documentation says little about
+the Tube: the test suite's driver turns it off (`docs/dev/test-suite.md`), the
+WiFi ROM switches `*UEF` to the host's BASIC, and the helper guides give `*GOIO`.
+
+**Hardware QA, final (ROM build 5, the debug kernel with all of the above).** Four
+scripted suites through a telnet session, each step checked against the ROM's
+screen read and a "still answers" probe:
+
+| Suite | Result |
+|---|---|
+| Screen: CLS, wrap, scroll, TAB, last column, text windows, VDU 31, in modes 0-7, teletext colours and double height | 48 / 48 |
+| Boot: three power-offs through the plug (the ROM hooks in with nothing typed, one hook and one reset seen, banners and prompt on connect, typing works) and three F12 BREAKs (terminal cleared, new banners, re-hooked) | 24 / 24 |
+| Editing: past the right edge and DELETE back over the wrap in modes 0, 1 and 7, the copy cursor's mark with UP / COPY / DOWN / RETURN, copied text echoed, copy then change, ESC in copy editing, the copy cursor at the screen's edges, a text window | 36 / 36 |
+| Demos: the solid cube (frames reach telnet at ~21 KB/s of terminal output, ESC stops it), the invaders game in MODE 1 colour, the PC-streamed cube in MODE 1 and 3 | 21 / 21 |
+
+The screen suite found one real fault on the way (a double height code's own cell
+overwritten in the live stream; fixed, with a host check), and the rest of the
+first-run failures were the test's own (a fresh session compared before its first
+redraw; the terminal emulator lacking `ESC #`).
+
+**Demos, outside the repository** (the owner's video material): a solid, shaded,
+bouncing cube for the Beeb's own MODE 7 screen, rendered on the PC by ray casting
+each cell and stored as 60 frames of differences (17.5 KB, `VDU 31` runs) that a
+60-byte player on the Beeb prints in a loop: it ran at about 6.7 frames a second,
+set by the Beeb's printing, the same on the Beeb and in the terminal. Building it
+in BBC BASIC alone managed 0.3 frames a second, and the BASIC assembler on the
+bench mis-assembled forward branches in one program (left as `BNE *`, the cause
+not found), so the player is assembled by the PC tool and poked in from `DATA`.
