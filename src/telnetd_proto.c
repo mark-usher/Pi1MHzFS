@@ -182,9 +182,12 @@ size_t tnd_in_byte(tnd_in_t *s, uint8_t c, uint32_t now_us,
 
    switch (s->state) {
    case I_IAC:
+      if (c != TN_IAC)
+         s->telnet = true;                      /* a command: the client speaks telnet */
       switch (c) {
       case TN_IAC:                              /* a literal 0xFF: not a Beeb key */
          s->state = I_NORMAL;
+         s->data = true;
          break;
       case TN_WILL: case TN_WONT: case TN_DO: case TN_DONT:
          s->cmd = c;
@@ -202,10 +205,37 @@ size_t tnd_in_byte(tnd_in_t *s, uint8_t c, uint32_t now_us,
    case I_OPT:
       s->state = I_NORMAL;
       if (s->cmd == TN_DO) {
-         if (c != TN_OPT_ECHO && c != TN_OPT_SGA && !seen(s->seen_do, c)) {
+         if (c == TN_OPT_ECHO && s->refuse_echo) {  /* line mode by the setting: the client echoes */
+            s->echo_opt = TND_OPT_OFF;
+            if (!seen(s->seen_do, c)) {
+               mark(s->seen_do, c);
+               rep[0] = TN_IAC; rep[1] = TN_WONT; rep[2] = c;
+               *replen = 3u;
+            }
+         } else if (c == TN_OPT_ECHO || c == TN_OPT_SGA) {
+            /* Our offer accepted needs no reply; asked for again after a DONT, it is
+               agreed to (RFC 854: a reply only where the state changes). */
+            uint8_t *o = (c == TN_OPT_ECHO) ? &s->echo_opt : &s->sga_opt;
+            if (*o == TND_OPT_OFF) {
+               rep[0] = TN_IAC; rep[1] = TN_WILL; rep[2] = c;
+               *replen = 3u;
+            }
+            *o = TND_OPT_ON;
+         } else if (!seen(s->seen_do, c)) {
             mark(s->seen_do, c);
             rep[0] = TN_IAC; rep[1] = TN_WONT; rep[2] = c;
             *replen = 3u;
+         }
+      } else if (s->cmd == TN_DONT) {
+         if (c == TN_OPT_ECHO || c == TN_OPT_SGA) {
+            /* Refusing the offer needs no reply; turning it off once it was on is
+               acknowledged (WONT), as RFC 854 asks. */
+            uint8_t *o = (c == TN_OPT_ECHO) ? &s->echo_opt : &s->sga_opt;
+            if (*o == TND_OPT_ON) {
+               rep[0] = TN_IAC; rep[1] = TN_WONT; rep[2] = c;
+               *replen = 3u;
+            }
+            *o = TND_OPT_OFF;
          }
       } else if (s->cmd == TN_WILL) {
          if (c != TN_OPT_SGA && !seen(s->seen_will, c)) {
@@ -321,6 +351,8 @@ size_t tnd_in_byte(tnd_in_t *s, uint8_t c, uint32_t now_us,
       return 0u;
 
    default:
+      if (c != TN_IAC)
+         s->data = true;                        /* not negotiation: a key */
       if (c == 27u) {
          s->state = I_ESC;
          s->esc_us = now_us;
@@ -1864,4 +1896,260 @@ size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX
 bool tnd_stalled(bool pending, uint32_t now_us, uint32_t progress_us, uint32_t limit_us)
 {
    return pending && (uint32_t)(now_us - progress_us) >= limit_us;
+}
+
+/* ---- line mode ------------------------------------------------------------------
+   See the header for the decision.  The Beeb -> client half is a second, much smaller
+   translator over the same VDU stream: plain text out, every control code and its
+   parameter bytes (vdu_params, the same table the screen translator uses) dropped.
+
+   The echo.  The Beeb's line editor (OSWORD 0) prints each key it is given, and a new
+   line for RETURN; the client has already shown the line, so that echo is taken out.
+   Every key the daemon gives the Beeb is remembered (tnd_line_typed), and output that
+   matches them, in order, is held back rather than written.  RETURN matches a CR or an
+   LF; the line is then confirmed, what was held is dropped, and the rest of its new
+   line (CRs, up to the first LF) is dropped too.  Output that stops matching was not
+   the echo: what was held is written after all and matching starts again at the first
+   key still expected.  An echo that does not come within TND_ECHO_US of the Beeb last
+   doing anything (a program reading with GET, which does not echo) is given up. */
+
+uint8_t tnd_decide(const tnd_in_t *s, uint8_t setting, uint32_t now_us, uint32_t start_us)
+{
+   if (setting == TND_SET_SCREEN)
+      return TND_MODE_SCREEN;
+   if (setting == TND_SET_LINE)
+      return TND_MODE_LINE;
+   if (s->echo_opt == TND_OPT_OFF || s->sga_opt == TND_OPT_OFF)
+      return TND_MODE_LINE;
+   if (s->echo_opt == TND_OPT_ON)
+      return TND_MODE_SCREEN;
+   if (s->data || (uint32_t)(now_us - start_us) >= TND_DECIDE_US)
+      return TND_MODE_LINE;
+   return TND_MODE_UNDECIDED;
+}
+
+bool tnd_ga_wanted(const tnd_in_t *s)
+{
+   return s->telnet && s->sga_opt != TND_OPT_ON;
+}
+
+void tnd_line_reset(tnd_line_t *s, bool utf8, uint8_t mode)
+{
+   memset(s, 0, sizeof *s);
+   s->utf8 = utf8;
+   s->tele = (mode & 7u) == 7u;
+}
+
+size_t tnd_line_room(const tnd_line_t *s)
+{
+   return TND_LINE_EXP - s->en;
+}
+
+/* The place in the ring of the i'th key still expected. */
+static unsigned ring_at(const tnd_line_t *s, unsigned i)
+{
+   return ((unsigned)s->eh + i) % TND_LINE_EXP;
+}
+
+void tnd_line_typed(tnd_line_t *s, uint8_t key, uint32_t now_us)
+{
+   s->typed_us = now_us;
+   s->ga_armed = true;
+   if (s->en < TND_LINE_EXP) {
+      s->exp[ring_at(s, s->en)] = key;
+      s->en++;
+   }
+}
+
+void tnd_line_escape(tnd_line_t *s)
+{
+   s->eh = s->en = s->matched = 0u;
+   s->nl = false;
+}
+
+static size_t line_newline(tnd_line_t *s, uint8_t *dst)
+{
+   s->col = 0u;
+   s->cr = false;
+   s->gfx = false;
+   dst[0] = '\r';
+   dst[1] = '\n';
+   return 2u;
+}
+
+/* A character that takes a place on the line. */
+static size_t line_glyph(tnd_line_t *s, uint8_t ch, uint8_t *dst)
+{
+   size_t n = 0u;
+
+   if (s->cr)                                   /* the Beeb went back to overwrite: a new line here */
+      n = line_newline(s, dst);
+   if (ch == 96u) {                             /* the pound sign (in MODE 7 too: the MOS swaps it in) */
+      if (s->utf8)
+         dst[n++] = 0xC2u;
+      dst[n++] = 0xA3u;
+   } else {
+      dst[n++] = ch;
+   }
+   if (s->col < 255u)
+      s->col++;
+   return n;
+}
+
+/* One byte of the VDU stream, the echo already taken out. */
+static size_t line_strip(tnd_line_t *s, uint8_t c, uint8_t *dst)
+{
+   if (s->code != 0u) {                         /* a parameter byte */
+      s->got++;
+      if (s->code == 22u && s->got == 1u)
+         s->tele = (c & 7u) == 7u;              /* MODE: what the codes from 128 mean */
+      if (s->got >= vdu_params(s->code)) {
+         uint8_t code = s->code;
+         s->code = 0u;
+         if (code == 22u && !s->disabled && (s->col != 0u || s->cr))
+            return line_newline(s, dst);        /* a MODE clears the screen: what follows is a new line */
+      }
+      return 0u;
+   }
+   if (vdu_params(c) != 0u) {                   /* parameters are counted even under VDU 21, as the MOS does */
+      s->code = c;
+      s->got = 0u;
+      return 0u;
+   }
+   if (s->disabled) {
+      if (c == 6u)
+         s->disabled = false;
+      return 0u;
+   }
+   if (c < 32u) {
+      switch (c) {
+      case 7:
+         dst[0] = 7u;
+         return 1u;
+      case 9:                                   /* cursor right: a space keeps the columns */
+         return line_glyph(s, ' ', dst);
+      case 10:
+         return line_newline(s, dst);
+      case 13:
+         if (s->col != 0u)
+            s->cr = true;
+         return 0u;
+      case 12:                                  /* CLS: what follows starts a line */
+         if (s->col != 0u || s->cr)
+            return line_newline(s, dst);
+         return 0u;
+      case 21:
+         s->disabled = true;
+         return 0u;
+      default:                                  /* cursor moves, home, windows ...: dropped */
+         return 0u;
+      }
+   }
+   if (c == 127u) {                             /* DELETE: back over the last character */
+      if (s->col == 0u || s->cr)
+         return 0u;
+      s->col--;
+      dst[0] = 8u; dst[1] = ' '; dst[2] = 8u;
+      return 3u;
+   }
+   if (c < 128u) {
+      if (s->tele && s->gfx && (c < 0x40u || c >= 0x60u))
+         return line_glyph(s, ' ', dst);        /* a mosaic: there is no text in it */
+      return line_glyph(s, c, dst);
+   }
+   if (!s->tele)                                /* user-defined characters: no text either */
+      return 0u;
+   if (c < 0xA0u) {                             /* a teletext control code: a space on the screen */
+      if (c >= 0x91u && c <= 0x97u)
+         s->gfx = true;
+      else if (c >= 0x81u && c <= 0x87u)
+         s->gfx = false;
+      return line_glyph(s, ' ', dst);
+   }
+   c = (uint8_t)(c & 0x7Fu);                    /* from 0xA0 the chip ignores bit 7 */
+   if (c == 127u || (s->gfx && (c < 0x40u || c >= 0x60u)))
+      c = ' ';
+   return line_glyph(s, c, dst);
+}
+
+/* What was held back as a possible echo was not one: write it after all. */
+static size_t line_release(tnd_line_t *s, uint8_t *dst)
+{
+   size_t   n = 0u;
+   uint16_t m = s->matched;
+
+   s->matched = 0u;
+   for (uint16_t i = 0u; i < m; i++)
+      n += line_strip(s, s->exp[ring_at(s, i)], dst + n);
+   return n;
+}
+
+size_t tnd_line_beeb(tnd_line_t *s, uint8_t c, uint32_t now_us, uint8_t *dst)
+{
+   size_t n = 0u;
+
+   s->out_us = now_us;
+   if (s->code == 0u && !s->disabled) {         /* a byte that can be part of the echo */
+      if (s->nl) {                              /* the end of an echoed line: CRs, then the LF */
+         if (c == 13u)
+            return 0u;
+         s->nl = false;
+         if (c == 10u)
+            return 0u;
+      }
+      if (s->en != 0u) {
+         uint8_t want = s->exp[ring_at(s, s->matched)];
+         if (s->matched < s->en && want == 13u && (c == 13u || c == 10u)) {
+            s->eh = (uint16_t)ring_at(s, (unsigned)s->matched + 1u);   /* the line's echo, all of it */
+            s->en = (uint16_t)((unsigned)s->en - s->matched - 1u);
+            s->matched = 0u;
+            s->col = 0u;                        /* the client's cursor is at the start of a line */
+            s->cr = false;
+            s->gfx = false;
+            s->nl = (c == 13u);
+            return 0u;
+         }
+         if (s->matched < s->en && want == c) {
+            s->matched++;
+            return 0u;
+         }
+         if (s->matched != 0u) {                /* it stopped matching: not the echo */
+            n = line_release(s, dst);
+            if (s->exp[s->eh] == c && s->code == 0u && !s->disabled) {
+               s->matched = 1u;
+               s->ga_armed = s->ga_armed || n != 0u;
+               return n;
+            }
+         }
+      }
+   }
+   n += line_strip(s, c, dst + n);
+   if (n != 0u)
+      s->ga_armed = true;
+   return n;
+}
+
+size_t tnd_line_tick(tnd_line_t *s, uint32_t now_us, uint8_t *dst)
+{
+   size_t n = 0u;
+
+   if (s->en == 0u || (uint32_t)(now_us - s->out_us) < TND_ECHO_US
+       || (uint32_t)(now_us - s->typed_us) < TND_ECHO_US)
+      return 0u;
+   if (s->matched != 0u)
+      n = line_release(s, dst);
+   s->eh = s->en = 0u;
+   if (n != 0u)
+      s->ga_armed = true;
+   return n;
+}
+
+bool tnd_line_ga_due(tnd_line_t *s, uint32_t now_us, bool keys_waiting)
+{
+   if (!s->ga_armed || keys_waiting || s->matched != 0u
+       || (uint32_t)(now_us - s->out_us) < TND_GA_US
+       || (uint32_t)(now_us - s->typed_us) < TND_GA_US)
+      return false;
+   s->ga_armed = false;
+   return true;
 }

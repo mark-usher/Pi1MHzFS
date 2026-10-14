@@ -259,9 +259,14 @@ static void test_negotiation(void)
    FEED(&s, "\xff\xfb\x1f");
    CHECK(nreply == 3, "once");
 
-   in_reset();
-   FEED(&s, "\xff\xfe\x01\xff\xfc\x01");
-   CHECK(nreply == 0, "DONT and WONT need no reply");
+   /* Refusing an offer, or the client's own WONT, needs no reply.  A fresh session:
+      this one accepted ECHO above, and turning it off then is acknowledged (see the
+      line mode tests). */
+   {
+      tnd_in_t f; tnd_in_reset(&f); in_reset();
+      FEED(&f, "\xff\xfe\x01\xff\xfc\x01");
+      CHECK(nreply == 0, "DONT and WONT need no reply");
+   }
 
    /* Subnegotiation is dropped entirely, even with an escaped 0xFF inside. */
    in_reset();
@@ -930,6 +935,432 @@ static void test_stalled(void)
    CHECK(!tnd_stalled(true, 4000u, 0xFFFFF000u, 9000u), "wrapped, and not yet");
 }
 
+/* ---- line mode ------------------------------------------------------------- */
+
+static void test_mode_decision(void)
+{
+   const uint32_t t0 = 5000000u;
+   tnd_in_t s;
+
+   tnd_in_reset(&s); in_reset();
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_UNDECIDED, "nothing yet: undecided");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0 + TND_DECIDE_US - 1u, t0) == TND_MODE_UNDECIDED, "just inside the window");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0 + TND_DECIDE_US, t0) == TND_MODE_LINE, "no answer in the window: line (nc)");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, 100u, 0xFFFFFF00u) == TND_MODE_UNDECIDED, "the clock wrapped, 356 us in");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, TND_DECIDE_US, 0xFFFFFF00u) == TND_MODE_LINE, "the clock wrapped, past the window");
+   CHECK(tnd_decide(&s, TND_SET_SCREEN, t0, t0) == TND_MODE_SCREEN, "the setting: screen");
+   CHECK(tnd_decide(&s, TND_SET_LINE, t0, t0) == TND_MODE_LINE, "the setting: line");
+   CHECK(!tnd_ga_wanted(&s), "nothing said: no GA");
+
+   /* A terminal client: accepts the server's echo. */
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\xff\xfd\x01\xff\xfd\x03\xff\xfb\x03");
+   CHECK(nreply == 0, "the offer accepted: no reply");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_SCREEN, "DO ECHO, DO SGA: screen");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0 + 10u * TND_DECIDE_US, t0) == TND_MODE_SCREEN, "... and stays so");
+   CHECK(tnd_decide(&s, TND_SET_LINE, t0, t0) == TND_MODE_LINE, "the setting still wins");
+   CHECK(s.telnet && !tnd_ga_wanted(&s), "SGA agreed: no GA");
+
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\xff\xfd\x01");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_SCREEN, "DO ECHO alone is enough");
+   FEED(&s, "PRINT\r");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_SCREEN, "typing does not change a decided terminal");
+
+   /* A client that refuses: line mode, as soon as it says so. */
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\xff\xfe\x01\xff\xfe\x03\xff\xfc\x03");
+   CHECK(nreply == 0, "refusing the offer needs no reply");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_LINE, "DONT ECHO: line");
+   CHECK(tnd_ga_wanted(&s), "it speaks telnet and SGA is off: GA");
+
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\xff\xfd\x01\xff\xfe\x03");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_LINE, "DO ECHO but DONT SGA: line");
+
+   /* A raw client: its first bytes are data. */
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "PRINT 2+2\n");
+   CHECK(KEYS("PRINT 2+2\r"), "nc's line: keys, LF a RETURN");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_LINE, "data before any answer: line at once");
+   CHECK(!s.telnet && !tnd_ga_wanted(&s), "a raw client: no GA (it would be junk)");
+
+   /* Late negotiation: the latest answer wins. */
+   in_reset();
+   FEED(&s, "\xff\xfd\x01");
+   CHECK(nreply == 0, "a late DO ECHO accepts the offer: no reply");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0 + 5u * TND_DECIDE_US, t0) == TND_MODE_SCREEN, "late DO ECHO: screen after all");
+   in_reset();
+   FEED(&s, "\xff\xfe\x01");
+   static const uint8_t wont1[] = { 255, 252, 1 };
+   CHECK(nreply == 3 && memcmp(reply, wont1, 3) == 0, "DONT ECHO once on: acknowledged with WONT ECHO"); if (nreply != 3) dump();
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_LINE, "DONT ECHO (a client's mode line): line");
+   in_reset();
+   FEED(&s, "\xff\xfe\x01");
+   CHECK(nreply == 0, "DONT ECHO again: already off, no reply (no loop)");
+   FEED(&s, "\xff\xfd\x01");
+   static const uint8_t will1[] = { 255, 251, 1 };
+   CHECK(nreply == 3 && memcmp(reply, will1, 3) == 0, "DO ECHO when off: agreed with WILL ECHO"); if (nreply != 3) dump();
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_SCREEN, "DO ECHO (mode character): screen");
+   in_reset();
+   FEED(&s, "\xff\xfd\x01");
+   CHECK(nreply == 0, "DO ECHO again: already on, no reply");
+   FEED(&s, "\xff\xfd\x03");
+   CHECK(nreply == 0, "DO SGA: the offer accepted");
+   FEED(&s, "\xff\xfe\x03");
+   static const uint8_t wont3[] = { 255, 252, 3 };
+   CHECK(nreply == 3 && memcmp(reply, wont3, 3) == 0, "DONT SGA once on: WONT SGA");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_LINE, "SGA off: line");
+   in_reset();
+   FEED(&s, "\xff\xfd\x03");
+   static const uint8_t will3[] = { 255, 251, 3 };
+   CHECK(nreply == 3 && memcmp(reply, will3, 3) == 0, "DO SGA when off: WILL SGA");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_SCREEN, "both on again: screen");
+
+   /* Line mode by the setting: nothing was offered, and the server will not echo. */
+   tnd_in_reset(&s); in_reset();
+   s.refuse_echo = true;
+   s.echo_opt = s.sga_opt = TND_OPT_OFF;
+   FEED(&s, "\xff\xfd\x01");
+   CHECK(nreply == 3 && memcmp(reply, wont1, 3) == 0, "forced line mode: DO ECHO is refused");
+   FEED(&s, "\xff\xfd\x01");
+   CHECK(nreply == 3, "... once");
+   in_reset();
+   FEED(&s, "\xff\xfd\x03");
+   CHECK(nreply == 3 && memcmp(reply, will3, 3) == 0, "DO SGA: agreed (it changes nothing)");
+   CHECK(tnd_decide(&s, TND_SET_LINE, t0, t0) == TND_MODE_LINE, "the setting holds");
+   CHECK(!tnd_ga_wanted(&s), "SGA on: no GA");
+
+   /* An IAC IAC is data (a literal 0xFF), not a sign of telnet. */
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\xff\xff");
+   CHECK(!s.telnet && s.data, "IAC IAC: data, not telnet");
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\xff\xf1");
+   CHECK(s.telnet && !s.data, "IAC NOP: telnet, not data");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_UNDECIDED, "a NOP decides nothing");
+}
+
+/* The line translator, fed a byte at a time; keys typed first. */
+static uint8_t lout[1 << 16]; static size_t nlout;
+static uint32_t lnow;
+
+static void lfeed(tnd_line_t *s, const void *data, size_t len)
+{
+   const uint8_t *p = data;
+   for (size_t i = 0; i < len; i++) {
+      uint8_t d[TND_LINE_OUT_MAX];
+      size_t n = tnd_line_beeb(s, p[i], lnow, d);
+      CHECK(n <= TND_LINE_OUT_MAX, "line output bound");
+      memcpy(lout + nlout, d, n); nlout += n;
+      lnow += 100u;
+   }
+}
+#define LFEED(s, lit) lfeed(s, lit, sizeof(lit) - 1)
+
+static void ltype(tnd_line_t *s, const void *data, size_t len)
+{
+   const uint8_t *p = data;
+   for (size_t i = 0; i < len; i++)
+      tnd_line_typed(s, p[i], lnow);
+}
+#define LTYPE(s, lit) ltype(s, lit, sizeof(lit) - 1)
+
+static void ltick(tnd_line_t *s, uint32_t advance)
+{
+   uint8_t d[TND_LINE_OUT_MAX];
+   lnow += advance;
+   size_t n = tnd_line_tick(s, lnow, d);
+   memcpy(lout + nlout, d, n); nlout += n;
+}
+
+static bool lout_is(const char *expect, size_t len)
+{
+   return nlout == len && memcmp(lout, expect, len) == 0;
+}
+#define LOUT(lit) lout_is(lit, sizeof(lit) - 1)
+
+static void ldump(void)
+{
+   printf("    out (%zu):", nlout);
+   for (size_t i = 0; i < nlout; i++)
+      printf(lout[i] >= 32 && lout[i] < 127 ? " %c" : " %02X", lout[i]);
+   printf("\n");
+}
+
+static void lstart(tnd_line_t *s, uint8_t mode)
+{
+   tnd_line_reset(s, true, mode);
+   nlout = 0;
+   lnow = 1000000u;
+}
+
+#define LCHECK(s, data, want, ...) do { nlout = 0; LFEED(s, data); \
+   CHECK(LOUT(want), __VA_ARGS__); if (!LOUT(want)) ldump(); } while (0)
+
+static void test_line_text(void)
+{
+   tnd_line_t s;
+
+   lstart(&s, 3);
+   LCHECK(&s, "HELLO", "HELLO", "text passes");
+   LCHECK(&s, "\n\r", "\r\n", "the MOS's LF CR: one CR LF");
+   LCHECK(&s, "A\r\nB", "A\r\nB", "CR LF: one CR LF");
+   LCHECK(&s, "\r\n\n\r", "\r\n\r\n", "a blank line survives");
+   LCHECK(&s, "W\r", "W", "a CR alone: held");
+   LCHECK(&s, "X", "\r\nX", "... text after it starts a new line (the Beeb would overwrite)");
+   LCHECK(&s, "\n\r\r\r", "\r\n", "CRs at the start of a line do nothing");
+   LCHECK(&s, "a\x07" "b", "a\x07" "b", "BEL passes");
+   LCHECK(&s, "a`b", "a\xc2\xa3" "b", "96 is the pound sign, UTF-8");
+   LCHECK(&s, "\n\rx\x7f\x7f", "\r\nx\b \b", "DELETE backs over what is on the line, not past its start");
+   LCHECK(&s, "\n\rab\x09" "c", "\r\nab c", "VDU 9 (cursor right) is a space");
+   LCHECK(&s, "q\x08\x0b\x1e\x1a\x0e\x0f\x10\x14\x02\x03\x04\x05\x06\x00", "q", "single-byte VDU codes are dropped");
+   LCHECK(&s, "\x0c", "\r\n", "CLS after text: a new line");
+   LCHECK(&s, "\x0c", "", "CLS at the start of a line: nothing");
+   LCHECK(&s, "\xc1\xff\x80", "", "outside MODE 7, user-defined characters are dropped");
+
+   tnd_line_reset(&s, false, 3);
+   LCHECK(&s, "`", "\xa3", "the pound sign in Latin-1");
+}
+
+static void test_line_vdu_params(void)
+{
+   tnd_line_t s;
+
+   lstart(&s, 3);
+   LCHECK(&s, "A\x1f\x41\x42" "B", "AB", "VDU 31 (TAB) and its two bytes, even when they are text");
+   LCHECK(&s, "\x11\x41" "C\x11\x81", "C", "VDU 17 (COLOUR) and its byte");
+   LCHECK(&s, "\x12\x0a\x0d" "D", "D", "VDU 18 (GCOL): parameter bytes 10 and 13 are not new lines");
+   LCHECK(&s, "\x13\x01\x02\x03\x04\x05" "E", "E", "VDU 19: five");
+   LCHECK(&s, "\x17\x01\x00\x00\x00\x00\x00\x00\x00\x00" "F", "F", "VDU 23: nine");
+   LCHECK(&s, "\x17\xe0\x0d\x0a\x07\x7f\x15\x06\x60\x41" "G", "G", "VDU 23 parameters that look like codes");
+   LCHECK(&s, "\x18\x00\x00\x00\x00\x10\x00\x10\x00" "H", "H", "VDU 24: eight");
+   LCHECK(&s, "\x19\x04\x00\x00\x00\x00\x19\x05\x10\x00\x10\x00" "I", "I", "VDU 25 (MOVE, DRAW): five each");
+   LCHECK(&s, "\x1c\x00\x18\x27\x00" "J", "J", "VDU 28: four");
+   LCHECK(&s, "\x1d\x00\x00\x00\x00" "K", "K", "VDU 29: four");
+   LCHECK(&s, "\x01\x41" "L", "L", "VDU 1 (to the printer only): one");
+
+   /* Split across calls: each byte is its own call already; feed in two slices too. */
+   nlout = 0;
+   LFEED(&s, "M\x1f\x05");
+   LFEED(&s, "\x06N");
+   CHECK(LOUT("MN"), "a VDU 31 split across two reads"); if (!LOUT("MN")) ldump();
+
+   LCHECK(&s, "\x16\x07", "\r\n", "MODE after text: a new line (the screen was cleared)");
+   LCHECK(&s, "\x16\x07", "", "MODE at the start of a line: nothing");
+   CHECK(s.tele, "MODE 7 noted");
+   LCHECK(&s, "\x16\x01" "\xc1", "", "MODE 1: high bytes are user-defined again");
+   CHECK(!s.tele, "MODE 1 noted");
+
+   /* VDU 21: nothing until VDU 6, parameters still counted. */
+   LCHECK(&s, "\n\rP\x15" "hidden\x1f\x06\x06" "more\x06" "Q", "\r\nPQ",
+          "VDU 21 hides everything until VDU 6, whose byte inside a VDU 31 does not count");
+}
+
+static void test_line_teletext(void)
+{
+   tnd_line_t s;
+
+   lstart(&s, 7);
+   LCHECK(&s, "\x81" "RED\x82" "GREEN", " RED GREEN", "colour codes are spaces, as on the screen");
+   LCHECK(&s, "\n\r\x8d" "BIG", "\r\n BIG", "double height: a space");
+   LCHECK(&s, "\n\r\xc8\xc9", "\r\nHI", "from 0xA0 bit 7 is ignored");
+   LCHECK(&s, "\n\r\x94\x7e\x2c\xa3" "AB\x87" "ab", "\r\n    AB ab",
+          "graphics: mosaics are spaces, capitals blast through, alpha again after 0x87");
+   LCHECK(&s, "\n\r\x97\x23\n\r" "#", "\r\n  \r\n#", "graphics end with the line");
+   LCHECK(&s, "\xff", " ", "0xFF is never written: a mosaic or DEL cell is a space");
+}
+
+static void test_line_echo(void)
+{
+   tnd_line_t s;
+
+   /* What BASIC does: the echo of the line, the MOS's new line, the answer, the prompt. */
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT 2+2\r");
+   LCHECK(&s, "PRINT 2+2\n\r         4\n\r>", "         4\r\n>", "the echo is taken out, the answer stays");
+   CHECK(s.en == 0 && s.matched == 0, "nothing left expected");
+
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT 2+2\r");
+   LCHECK(&s, "PRINT 2+2\r\n\r4", "4", "an echo ending CR LF CR");
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT 2+2\r");
+   LCHECK(&s, "PRINT 2+2\r4", "4", "an echo ending CR alone");
+   lstart(&s, 7);
+   LTYPE(&s, "X\r");
+   LCHECK(&s, "X\n\r\n\rA", "\r\nA", "after the echo's new line, a blank line of output stays");
+
+   lstart(&s, 7);
+   LCHECK(&s, ">", ">", "the prompt");
+   LTYPE(&s, "\r");
+   LCHECK(&s, "\n\r>", ">", "an empty line: its new line is the echo; the client is already on a new line");
+
+   /* Typed ahead: two lines, the second echoed after the first's output. */
+   lstart(&s, 7);
+   LTYPE(&s, "A\rB\r");
+   LCHECK(&s, "A\n\rout A\n\r>B\n\rout B\n\r>", "out A\r\n>out B\r\n>", "two lines typed ahead");
+
+   /* Output that only starts like the echo is not held for long. */
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT 1\r");
+   LCHECK(&s, "PRINTER\n\r>PRINT 1\n\r1\n\r>", "PRINTER\r\n>1\r\n>",
+          "a near match is written after all; the real echo later is still taken out");
+   CHECK(s.en == 0, "and it was");
+
+   lstart(&s, 7);
+   LTYPE(&s, "PP\r");
+   LCHECK(&s, "PPP\n\r", "PPP\r\n", "a match that breaks on its last key is written whole");
+   CHECK(s.en == 3, "and the echo is still expected");
+
+   /* Divergence: the echo is not what was typed (the line editor refused a key). */
+   lstart(&s, 7);
+   LTYPE(&s, "ABC\r");
+   LCHECK(&s, "AB\x07" "C\n\r", "AB\x07" "C\r\n", "a diverging echo is written in full");
+   ltick(&s, TND_ECHO_US);
+   CHECK(s.en == 0, "and given up once the Beeb is quiet");
+
+   /* No echo at all: a program reading with GET. */
+   lstart(&s, 7);
+   LTYPE(&s, "Y\r");
+   nlout = 0;
+   ltick(&s, TND_ECHO_US - 1u);
+   CHECK(s.en == 2, "not given up yet");
+   ltick(&s, 1u);
+   CHECK(s.en == 0 && nlout == 0, "given up after TND_ECHO_US");
+   LCHECK(&s, "You said Y\n\r", "You said Y\r\n", "so the program's text is not taken for an echo");
+
+   /* Half an echo, then nothing. */
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT\r");
+   LCHECK(&s, "PRI", "", "held");
+   nlout = 0;
+   ltick(&s, TND_ECHO_US);
+   CHECK(LOUT("PRI") && s.en == 0, "written when the echo stops coming"); if (!LOUT("PRI")) ldump();
+
+   /* The echo of a key cannot be a parameter byte. */
+   lstart(&s, 7);
+   LTYPE(&s, "PR\r");
+   LCHECK(&s, "\x1fPR", "", "VDU 31,80,82: parameters, not the echo");
+   CHECK(s.en == 3 && s.matched == 0, "still expected");
+   LCHECK(&s, "PR\n\rPR", "PR", "the echo, then output");
+
+   /* DELETE in the line, and the pound sign. */
+   lstart(&s, 7);
+   LTYPE(&s, "AB\x7f" "C`\r");
+   LCHECK(&s, "AB\x7f" "C`\n\r>", ">", "DELETE and the pound sign echo as typed");
+
+   /* ESCAPE: the type-ahead is gone. */
+   lstart(&s, 7);
+   LTYPE(&s, "10 PRINT\r");
+   tnd_line_escape(&s);
+   CHECK(s.en == 0, "ESCAPE forgets the expected echo");
+   LCHECK(&s, "\n\rEscape\n\r>", "\r\nEscape\r\n>", "and the Beeb's answer is written");
+
+   /* Room: no more keys than can be matched. */
+   lstart(&s, 7);
+   CHECK(tnd_line_room(&s) == TND_LINE_EXP, "room for TND_LINE_EXP keys");
+   for (unsigned i = 0; i < TND_LINE_EXP + 5u; i++)
+      tnd_line_typed(&s, 'Z', lnow);
+   CHECK(tnd_line_room(&s) == 0 && s.en == TND_LINE_EXP, "full, and the extra keys not recorded");
+
+   /* The ring wraps: many lines through it. */
+   lstart(&s, 7);
+   nlout = 0;
+   for (unsigned i = 0; i < 500; i++) {
+      char line[16];
+      int len = snprintf(line, sizeof line, "%u", i * 7u);
+      ltype(&s, line, (size_t)len);
+      tnd_line_typed(&s, 13, lnow);
+      lfeed(&s, line, (size_t)len);
+      lfeed(&s, "\n\r>", 3);
+   }
+   CHECK(nlout == 500 && s.en == 0, "500 lines through the ring: only the prompts are left"); if (nlout != 500) ldump();
+}
+
+static void test_line_ga(void)
+{
+   tnd_line_t s;
+
+   lstart(&s, 7);
+   CHECK(!tnd_line_ga_due(&s, lnow + 10u * TND_GA_US, false), "nothing happened: no GA");
+   LFEED(&s, ">");
+   CHECK(!tnd_line_ga_due(&s, lnow + TND_GA_US - 101u, false), "not quiet for long enough");
+   CHECK(!tnd_line_ga_due(&s, lnow + TND_GA_US, true), "keys still waiting for the Beeb");
+   CHECK(tnd_line_ga_due(&s, lnow + TND_GA_US, false), "quiet, keys taken: GA");
+   CHECK(!tnd_line_ga_due(&s, lnow + 5u * TND_GA_US, false), "once");
+
+   LTYPE(&s, "A");
+   CHECK(!tnd_line_ga_due(&s, lnow + TND_GA_US - 1u, false), "a key typed: not quiet yet");
+   CHECK(tnd_line_ga_due(&s, lnow + TND_GA_US, false), "a key typed and nothing printed: GA after the quiet");
+
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT\r");
+   LFEED(&s, "PRI");
+   CHECK(!tnd_line_ga_due(&s, lnow + TND_GA_US, false), "half an echo held: no GA");
+
+   lstart(&s, 7);
+   LTYPE(&s, "A\r");
+   LFEED(&s, "A\n\r");
+   CHECK(tnd_line_ga_due(&s, lnow + TND_GA_US, false), "an echo with nothing after it still ends with GA (the line was typed)");
+   lstart(&s, 7);
+   lnow = 0xFFFFFFF0u;
+   LFEED(&s, "x");
+   CHECK(!tnd_line_ga_due(&s, 0x100u, false), "the clock wrapped, not long enough");
+   CHECK(tnd_line_ga_due(&s, TND_GA_US, false), "the clock wrapped, quiet");
+}
+
+static void test_line_robustness(void)
+{
+   tnd_line_t s;
+   unsigned seed = 4242;
+   tnd_line_reset(&s, true, 7);
+   lnow = 0;
+   for (unsigned i = 0; i < 200000; i++) {
+      uint8_t d[TND_LINE_OUT_MAX];
+      size_t n;
+      seed = seed * 1103515245u + 12345u;
+      uint8_t c = (uint8_t)(seed >> 16);
+      if ((seed >> 8 & 7u) == 0u)
+         tnd_line_typed(&s, (uint8_t)(seed >> 24), lnow);
+      if ((seed >> 4 & 63u) == 0u)
+         c = (uint8_t)(seed >> 24);
+      n = tnd_line_beeb(&s, c, lnow, d);
+      CHECK(n <= TND_LINE_OUT_MAX, "line output bound at %u", i);
+      if (n > TND_LINE_OUT_MAX) return;
+      for (size_t j = 0; j < n; j++)
+         if (d[j] == 0xFF) { CHECK(0, "0xFF in the line output at %u", i); return; }
+      if ((i & 1023u) == 0u) {
+         lnow += TND_ECHO_US;
+         n = tnd_line_tick(&s, lnow, d);
+         CHECK(n <= TND_LINE_OUT_MAX, "tick bound");
+         if ((seed & 3u) == 0u)
+            tnd_line_escape(&s);
+      }
+      CHECK(s.en <= TND_LINE_EXP && s.matched <= s.en, "the echo ring stays consistent");
+      lnow += 7u;
+   }
+   /* The largest release: a full ring matched and then broken. */
+   tnd_line_reset(&s, true, 3);
+   for (unsigned i = 0; i < TND_LINE_EXP; i++)
+      tnd_line_typed(&s, '`', 0u);
+   {
+      uint8_t d[TND_LINE_OUT_MAX];
+      size_t n = 0;
+      for (unsigned i = 0; i < TND_LINE_EXP; i++)
+         n += tnd_line_beeb(&s, '`', 0u, d);
+      CHECK(n == 0 && s.matched == TND_LINE_EXP, "a whole ring held");
+      tnd_line_reset(&s, true, 3);
+      for (unsigned i = 0; i < TND_LINE_EXP; i++)
+         tnd_line_typed(&s, '`', 0u);
+      for (unsigned i = 0; i + 1u < TND_LINE_EXP; i++)
+         (void)tnd_line_beeb(&s, '`', 0u, d);
+      s.cr = true; s.col = 1;
+      n = tnd_line_beeb(&s, 'x', 0u, d);
+      CHECK(n <= TND_LINE_OUT_MAX && n == 2u * (TND_LINE_EXP - 1u) + 2u + 1u, "the biggest release fits (%zu)", n);
+   }
+}
+
 int main(void)
 {
    test_plain_keys();
@@ -952,6 +1383,13 @@ int main(void)
    test_copy_cursor();
    test_repaint();
    test_stalled();
+   test_mode_decision();
+   test_line_text();
+   test_line_vdu_params();
+   test_line_teletext();
+   test_line_echo();
+   test_line_ga();
+   test_line_robustness();
 
    printf("%d checks, %d failed\n", checks, failures);
    return failures ? 1 : 0;

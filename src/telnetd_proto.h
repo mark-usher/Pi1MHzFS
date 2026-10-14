@@ -54,7 +54,17 @@ typedef struct {
    uint8_t  dcs[16];            /* the start of a DCS the terminal sent (its answer to CSI > q) */
    uint8_t  ndcs;
    bool     xterm;              /* the terminal said it is xterm: it can draw in Tektronix 4014 mode */
+   /* What the client has said, for choosing screen or line mode (tnd_decide). */
+   uint8_t  echo_opt;           /* our WILL ECHO: TND_OPT_OFFERED, TND_OPT_ON (DO ECHO), TND_OPT_OFF (DONT ECHO) */
+   uint8_t  sga_opt;            /* our WILL SGA, the same */
+   bool     telnet;             /* the client has sent a telnet command (IAC ...): it speaks telnet */
+   bool     data;               /* the client has sent data, not only negotiation */
+   bool     refuse_echo;        /* line mode by the setting: ECHO was not offered, and DO ECHO is refused */
 } tnd_in_t;
+
+#define TND_OPT_OFFERED 0u
+#define TND_OPT_ON      1u
+#define TND_OPT_OFF     2u
 
 void   tnd_in_reset(tnd_in_t *s);
 
@@ -172,6 +182,87 @@ void   tnd_out_tek(tnd_out_t *s, bool on);
 void   tnd_out_touch(tnd_out_t *s, uint32_t now_us);
 void   tnd_out_copykey(tnd_out_t *s, uint8_t key);
 size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX]);
+
+/* ---- line mode ----------------------------------------------------------------
+   A client that is not a terminal (nc, a script, a raw socket) or a telnet client that
+   refuses the server's echo gets line mode: it types whole lines itself and is sent
+   what the Beeb prints as plain text, without the Beeb's echo of the line it typed.
+
+   Choosing the mode (tnd_decide), from what the client has answered to the greeting
+   (IAC WILL ECHO, WILL SGA, DO SGA), latest answer first:
+      DONT ECHO or DONT SGA                -> line   (it refuses to let the server echo)
+      DO ECHO (and SGA not refused)        -> screen (a terminal: character at a time)
+      data before any answer, or no answer
+      within TND_DECIDE_US                 -> line   (nc, a script)
+      otherwise                            -> not yet decided
+   The rules are a function of the state, so a late DO ECHO turns a line mode session
+   into a screen one, and a DONT ECHO (a client's "mode line") the other way.  The
+   setting (telnetd_linemode) overrides them. */
+
+#define TND_MODE_UNDECIDED 0u
+#define TND_MODE_SCREEN    1u
+#define TND_MODE_LINE      2u
+#define TND_SET_AUTO       0u
+#define TND_SET_SCREEN     1u
+#define TND_SET_LINE       2u
+#define TND_DECIDE_US      750000u
+
+uint8_t tnd_decide(const tnd_in_t *s, uint8_t setting, uint32_t now_us, uint32_t start_us);
+
+/* Does an end of output (IAC GA) mean anything to this client?  Only one that speaks
+   telnet and has not agreed to suppress go-ahead (DO SGA); to a raw client it is junk. */
+bool    tnd_ga_wanted(const tnd_in_t *s);
+
+#define TND_LINE_EXP     160u    /* keys whose echo is waited for */
+#define TND_LINE_OUT_MAX (4u * (TND_LINE_EXP + 1u))   /* most bytes one call writes */
+#define TND_ECHO_US      1000000u   /* an echo that has not come (or not finished) by then never will */
+#define TND_GA_US        300000u    /* the Beeb quiet this long, its keys taken: end of output */
+
+typedef struct {
+   uint8_t  code, got;          /* the VDU code whose parameters are being skipped, and how many so far */
+   bool     disabled;           /* VDU 21 seen: nothing until VDU 6 */
+   bool     utf8;               /* the pound sign as UTF-8 (else Latin-1) */
+   bool     tele;               /* MODE 7 */
+   bool     gfx;                /* MODE 7: a graphics colour code earlier on this line */
+   bool     cr;                 /* a CR that was not followed by LF: a new line before more text */
+   uint8_t  col;                /* characters on the client's line (capped): 0 at its start */
+   uint8_t  exp[TND_LINE_EXP];  /* the keys given to the Beeb whose echo is still to come */
+   uint16_t eh, en;             /* ... the oldest, and how many */
+   uint16_t matched;            /* bytes of the Beeb's output that matched them so far, held back */
+   bool     nl;                 /* a line's echo matched: its new line (CR ... LF) is being dropped */
+   bool     ga_armed;           /* something happened since the last end of output */
+   uint32_t typed_us, out_us;   /* the last key given, the last byte from the Beeb */
+} tnd_line_t;
+
+/* mode is the Beeb's screen MODE as far as it is known (0-7). */
+void   tnd_line_reset(tnd_line_t *s, bool utf8, uint8_t mode);
+
+/* How many more keys the echo can be waited for: the daemon gives the Beeb no more than
+   this, so that every key it types is matched. */
+size_t tnd_line_room(const tnd_line_t *s);
+
+/* A key has been given to the Beeb (into its keyboard buffer): its echo is expected. */
+void   tnd_line_typed(tnd_line_t *s, uint8_t key, uint32_t now_us);
+
+/* ESCAPE was sent: what was typed ahead is gone, so its echo will not come. */
+void   tnd_line_escape(tnd_line_t *s);
+
+/* One byte the Beeb printed; writes the client's bytes (TND_LINE_OUT_MAX at most).
+   Plain text: printable characters, CR LF for a new line, BEL; the pound sign; a
+   DELETE as BS SP BS.  Everything else - cursor moves, windows, colours, MODE,
+   graphics, teletext control codes (a space), VDU 23 and the parameter bytes of all
+   of them - is dropped.  No 0xFF is ever written. */
+size_t tnd_line_beeb(tnd_line_t *s, uint8_t c, uint32_t now_us, uint8_t *dst);
+
+/* Call regularly: an echo that has stopped coming is given up (what was held back
+   from it is written).  Returns the bytes written (TND_LINE_OUT_MAX at most). */
+size_t tnd_line_tick(tnd_line_t *s, uint32_t now_us, uint8_t *dst);
+
+/* True once each time the Beeb has gone quiet: something happened, nothing has been
+   printed or typed for TND_GA_US, no key is waiting (keys_waiting: the daemon's and
+   the redirect's queues) and no echo is half matched.  The daemon then sends IAC GA
+   if tnd_ga_wanted. */
+bool   tnd_line_ga_due(tnd_line_t *s, uint32_t now_us, bool keys_waiting);
 
 /* ---- a session that has stopped moving -------------------------------------- */
 
