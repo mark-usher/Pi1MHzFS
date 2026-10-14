@@ -1,5 +1,9 @@
 # Telnet daemon - design record
 
+> **STATUS 2026-10-14, part 2 (branch telnetd-linemode): line mode for nc and scripts,
+> chosen per connection, host-tested and run end to end in Beebium and a Python 6502
+> against the real MOS and BASIC (section 16). Not yet on the hardware.**
+>
 > **STATUS 2026-10-14: built, host-tested (206,751 translator checks, 179 ROM
 > checks), and run on a BBC Model B with the auto-start ROM build 5 in a flash bank:
 > every hardware QA suite passes (section 15). Second processor on real hardware,
@@ -675,3 +679,140 @@ set by the Beeb's printing, the same on the Beeb and in the terminal. Building i
 in BBC BASIC alone managed 0.3 frames a second, and the BASIC assembler on the
 bench mis-assembled forward branches in one program (left as `BNE *`, the cause
 not found), so the player is assembled by the PC tool and poked in from `DATA`.
+
+## 16. Part 2: line mode (branch telnetd-linemode, 2026-10-14)
+
+**STATUS: built, host-tested (610,811 translator checks, up from 206,751) and run end
+to end against the real MOS 1.20 and BASIC 2 in two emulators: Beebium 0.9.1 (a Model
+B, and a Model B with a 6502 second processor) and the repository's own Python 6502.
+The firmware builds warning-free for `rpi`, debug and release. Not yet run on the
+hardware.**
+
+The daemon serves line mode in the same process as screen mode, chosen for each
+connection. A client that is not a terminal (nc, a script, a telnet client in line
+mode) types whole lines and gets plain text back, without the Beeb's echo of the line.
+
+### Choosing the mode
+
+The greeting is unchanged (`IAC WILL ECHO, WILL SGA, DO SGA`), but in `auto` (the
+default) nothing else is sent until the mode is known. `tnd_decide()`
+(`telnetd_proto.c`) is a pure function of what the client has said and the time:
+
+| What the client did | Mode |
+|---|---|
+| `DONT ECHO` or `DONT SGA` (refused, or turned off later) | line |
+| `DO ECHO`, SGA not refused | screen |
+| sent data before any answer, or no answer within `TND_DECIDE_US` (750 ms) | line |
+| otherwise | not decided: the session has only the negotiation, and the Beeb's output waits in the redirect |
+
+The rules read the current state, so the latest answer wins. A `DO ECHO` that comes
+after the timeout turns a line session into a screen one: the terminal is drawn from
+the model, which keeps following the Beeb in line mode for this reason. A `DONT ECHO`
+goes the other way: colours reset, out of Tek mode, a new line. To make switching
+back and forth work, ECHO and SGA now follow RFC 854: turning an accepted option off
+is acknowledged (`WONT`), and asking for it again is agreed (`WILL`). Before this
+change neither got a reply. Refusing the offer still needs no reply.
+`telnetd_linemode=off` is screen mode with the greeting at once, as before.
+`telnetd_linemode=on` is line mode with nothing offered, so `nc` sees no junk, and
+`DO ECHO` is refused.
+
+TTYPE was considered and left out: it would add a round trip and change the screen
+mode greeting, and a client's answer to ECHO already says whether it will do its
+own echoing, which is what line mode needs to know. A client that accepts the echo
+but is a dumb terminal still gets screen mode.
+
+### Line mode, both ways
+
+- **In:** the same `tnd_in_byte` (IAC handling, CR LF / CR NUL / LF to RETURN,
+  Ctrl-C and a lone ESC to ESCAPE through `serial_redirect_escape()`, DEL passed).
+  Ctrl-L (F11's redraw) is ignored in line mode. Keys are not buffered into lines.
+  A client sends lines anyway, and the Beeb gets them as they come.
+- **Out:** `tnd_line_beeb`, a second translator over the same VDU stream, using the
+  screen translator's `vdu_params` table, so every parameter byte is skipped,
+  including when it is split across reads and under VDU 21 (counted, as the MOS
+  does). Printable characters pass. LF gives CR LF. A CR gives a new line only if
+  text follows it on the same line (the Beeb would overwrite; here it is a new
+  line). VDU 9 is a space, CLS and MODE end a line that has text, DELETE is BS SP BS,
+  BEL passes, 96 is the pound sign. Everything else is dropped. In MODE 7 the
+  control codes are spaces, codes from 0xA0 lose bit 7, and after a graphics colour
+  code the mosaic characters are spaces. Outside MODE 7, codes from 128 are
+  user-defined characters and are dropped.
+- **The echo:** every key given to the redirect is remembered (`tnd_line_typed`).
+  Output that matches them in order is held back. RETURN matches a CR or an LF,
+  and the line is then confirmed and its new line dropped (CRs, up to the first LF).
+  Output that stops matching is released as it was and matching restarts. An echo
+  may also start at a later expected line. A line whose keys GET took has no echo,
+  and without this it would block every later line until the 1 s give-up. The
+  earlier lines are only forgotten when the later line's echo is complete.
+  Expectations are given up once nothing has been typed or printed for
+  `TND_ECHO_US` (1 s). The daemon gives the redirect no more keys than
+  `tnd_line_room()` (160), so every key it types can be matched; a paste is paced
+  by the echo.
+- **End of output:** `tnd_line_ga_due` is true once each time something happened
+  and then the Beeb has printed nothing for `TND_GA_US` (300 ms), no key is waiting
+  in the daemon's ring, and no echo is half matched. The daemon then sends `IAC GA`,
+  but only to a client that has sent a telnet command and has not agreed SGA
+  (`tnd_ga_wanted`): to `nc` it would be junk. Keys already in the redirect's FIFO
+  are not visible to telnetd without a change to `serial_redirect.c`. They count as
+  typed instead: the 300 ms runs from the last of them.
+- **Keepalive:** a raw client (one that never sent IAC) in line mode gets a NUL
+  instead of `IAC NOP`.
+- **Login:** the prompts are the same. In line mode the daemon does not echo the
+  user name, since the client does. The password is then shown by the client.
+- **Not in line mode:** the repaint, the ROM's screen scan, F11, the copy cursor,
+  narrow window redraws and Tek. They come back with screen mode.
+
+`serial_redirect.c` is not changed.
+
+### The emulator harness (`tools/telnetd-emu`)
+
+The transcript checks drive the daemon's own `telnetd_proto.c`, built with
+`fakepi.c` (telnetd.c's glue without lwIP), against the real MOS 1.20 and BASIC 2:
+
+- **Beebium (primary, `beebium_run.py`).** Beebium 0.9.1 has no way to add a
+  1MHz-bus device without a native extension, and the install has no SDK and there
+  is no Windows toolchain. So the firmware's stub bytes run from RAM (`&0A40`, with
+  their own addresses moved there) instead of FRED. The escape routine is below
+  them (`ESCR_OFF`, 13 to follow the main branch). Each of the stub's port stores
+  is a debugger breakpoint where the harness does what `serial_redirect.c` does and
+  steps over the store. nIRQ is a whole-space breakpoint with the condition "gate
+  open and I clear", and the harness then takes the interrupt as the 6502 does. The
+  MOS's IRQ path, INSV into the keyboard buffer, OSWORD 0, `*FX3,1` and the Tube are
+  all Beebium's. The fake Pi runs in WSL as a program on a pipe.
+- **The Python 6502 (fallback, `run.py`).** About 600 lines: a 6502, the system VIA
+  and FRED with the stub at `&FCCC` where the firmware puts it, about 15 s a run, no
+  Windows dependencies. It found the GET case above.
+
+Results, 25 transcript checks each:
+
+| Rig | Result |
+|---|---|
+| Python 6502, Model B | 25 / 25 |
+| Beebium, `model-b` | 25 / 25 (about 10,000 debugger stops, 1.5 min) |
+| Beebium, `model-b-disc-65c02-copro` (BASIC on the second processor) | 25 / 25 |
+
+The checks: the greeting is only the negotiation; nc's first line gives line mode;
+`PRINT 2+2` gives `         4` and `>` with no echo; `*HELP`; `PRIMT` gives
+`Mistake`; a program typed in, `LIST` and `RUN`; `10 GOTO 10` stopped by Ctrl-C
+(`Escape at line 10`, through the escape routine, so it reaches the second
+processor); `TAB(5,3)`, `COLOUR` bytes, `VDU 31` and `VDU 23` stripped, teletext
+codes as spaces, bell and pound kept; INPUT's prompt and answer; GET; MODE 4 and
+back; four lines in one burst; DONT ECHO and DONT SGA give line mode with `IAC GA`
+after the prompt; DO ECHO gives screen mode with the Beeb's own echo; no answer in
+750 ms gives line mode, then a late DO ECHO gives screen; `telnetd_linemode=on`
+negotiates nothing.
+
+### Still to check on the hardware
+
+- Timing on a real Beeb and network: the 750 ms window against a slow Wi-Fi round
+  trip, and a terminal whose `DO ECHO` arrives late (it would see line mode and then
+  switch to screen).
+- Linux telnet's `mode line` and `mode character`: whether they send DONT/DO ECHO,
+  and so switch modes, was not tested.
+- PuTTY's "passive" negotiation mode (it waits for the server, then answers): it
+  should answer within the window.
+- The escape routine: the harness has its own copy of it, at `ESCR_OFF` 13 below
+  the stub, to match the main branch.
+- The interaction with the ROM's screen scan and the unseen ROM filing system
+  output: line mode does not ask for scans, so `*CAT` on the ROM filing system
+  shows nothing in line mode.

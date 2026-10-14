@@ -261,6 +261,72 @@ line that was on the screen before the daemon saw it. `telnetd_copycursor=0`
 turns it off (a game that reads the arrow keys would otherwise move a mark
 about).
 
+## Line mode: nc and scripts
+
+A terminal client (telnet, PuTTY) gets the Beeb's screen, as described above. A
+client that is not a terminal gets **line mode** instead: it sends whole lines, and
+gets back only what the Beeb printed in answer, as plain text, the way a shell
+behaves over `nc`:
+
+```
+$ nc 192.168.1.20 23
+PRINT 2+2
+         4
+>*HELP
+
+OS 1.20
+>
+```
+
+You do not need to set anything. The daemon chooses the mode for each connection
+from how the client answers the telnet negotiation it sends first:
+
+- a client that accepts the server's echo (every telnet terminal) gets screen mode;
+- a client that refuses it (`DONT ECHO`, `DONT SGA`), sends data before it answers
+  (`nc`, `printf ... | nc`, a script on a raw socket), or does not answer within
+  three quarters of a second gets line mode.
+
+The latest answer counts. A late "yes" turns a line mode session into a screen one,
+and a client that turns the server's echo off (a telnet client's `mode line`, if it
+does so) gets line mode. To fix the mode, set `telnetd_linemode=on` (always line
+mode, and nothing is negotiated) or `telnetd_linemode=off` (always screen mode,
+exactly as before) in `Pi1MHz.cfg`.
+
+In line mode:
+
+- **Each line is typed on the Beeb with RETURN** (CR LF, CR or LF all end a line).
+  The Beeb's echo of the line is taken out of what comes back, since your side has
+  already shown it. If what the Beeb prints stops matching the line, it is passed
+  on as it is.
+- **What comes back is text.** Cursor moves, TAB(x,y), colours, MODE, windows,
+  graphics and VDU 23 are dropped, along with their parameter bytes. Teletext
+  control codes become spaces, as on the screen. New lines arrive as CR LF. The
+  bell and the pound sign are kept. DELETE comes back as backspace, space,
+  backspace.
+- **Ctrl-C is ESCAPE**, as in screen mode. With `nc` in a terminal, Ctrl-C stops
+  `nc` itself. Type Ctrl-V Ctrl-C and then RETURN instead: the Ctrl-C goes as
+  ESCAPE and the RETURN gives an empty line.
+- **The end of the output** is marked with telnet's Go Ahead (`IAC GA`) once the
+  Beeb has printed nothing for 0.3 s and has taken every key, so a script can wait
+  for it. The daemon sends it only to a client that speaks telnet and has not
+  turned Go Ahead off. A raw socket client, such as `nc`, never gets it, because it
+  would show as junk.
+- **The negotiation shows as junk on `nc`** in automatic mode: nine bytes at the
+  start, before the greeting. `telnetd_linemode=on` sends none.
+
+Limitations:
+
+- **Full-screen programs** (editors, games, anything drawn with TAB(x,y)) make no
+  sense as lines. Use a terminal.
+- **GET and INKEY wait for RETURN**, because nothing is sent until the line ends.
+  The rest of the line follows the key the program took. A program that reads a key
+  and prints that same key followed by a new line looks exactly like an echo, so
+  that output is lost.
+- **No teletext colours, graphics, F11 redraw or copy cursor.** These are all
+  screen mode features.
+- **A password is echoed by your own client** at the login prompt, since in line
+  mode the client does its own echoing.
+
 ## Things to know
 
 - **ESC and Ctrl-C raise the Beeb's ESCAPE**, so they stop a running BASIC
@@ -430,6 +496,7 @@ password set the daemon lets anyone on the network type on your Beeb.
 | `telnetd_mode` | `7` | The Beeb's screen mode (0-7) until it sends a `MODE`. Its size cannot be read, and the daemon needs it to follow the text. |
 | `telnetd_copycursor` | `1` | `0` does not mark the copy cursor in the terminal. |
 | `telnetd_tek` | `1` | Draw the Beeb's graphics in xterm's Tektronix window when the terminal says it is xterm; `0`: never. |
+| `telnetd_linemode` | `auto` | Screen or line mode for each connection, from what the client answers. `on`: always line mode, nothing negotiated (clean for `nc`); `off`: always screen mode. |
 
 `/status` on the web interface has a **Telnetd** row (the port, whether a
 session is live, who from) and the **Serial** row says `hooked (telnet)`
