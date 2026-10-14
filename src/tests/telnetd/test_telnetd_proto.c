@@ -1373,6 +1373,462 @@ static void test_line_robustness(void)
    }
 }
 
+/* ---- shell mode ------------------------------------------------------------------ */
+
+static tnd_shell_t sh;
+static tnd_in_t    shin;
+static uint8_t     scli[1 << 18]; static size_t nscli;
+static uint8_t     skey[1 << 14]; static size_t nskey;
+static int         sesc;
+static uint32_t    snow;
+static uint8_t     iocli[TND_SH_CLI_MAX], iokeys[TND_SH_KEYS_MAX];
+
+static void sh_take(tnd_sh_io_t *io)
+{
+   CHECK(io->ncli <= TND_SH_CLI_MAX && io->nkeys <= TND_SH_KEYS_MAX, "shell io bounds");
+   memcpy(scli + nscli, io->cli, io->ncli); nscli += io->ncli;
+   memcpy(skey + nskey, io->keys, io->nkeys); nskey += io->nkeys;
+   if (io->escape) sesc++;
+}
+
+static void sh_newio(tnd_sh_io_t *io)
+{
+   io->cli = iocli; io->ncli = 0; io->keys = iokeys; io->nkeys = 0; io->escape = false;
+}
+
+static void sstart(uint8_t ttx)
+{
+   tnd_shell_reset(&sh, true, 7, ttx);
+   tnd_in_reset(&shin);
+   shin.edit_keys = true;
+   nscli = nskey = 0; sesc = 0;
+   snow = 50000000u;                             /* the Beeb long quiet */
+}
+
+/* Client bytes, through tnd_in as the daemon does. */
+static void stype(const void *data, size_t len)
+{
+   const uint8_t *p = data;
+   for (size_t i = 0; i < len; i++) {
+      uint8_t k[TND_IN_KEYS], r[TND_IN_REPLY];
+      size_t rl, n = tnd_in_byte(&shin, p[i], snow, k, r, &rl);
+      for (size_t j = 0; j < n; j++) {
+         tnd_sh_io_t io; sh_newio(&io);
+         tnd_shell_key(&sh, k[j], snow, &io);
+         sh_take(&io);
+      }
+      snow += 1000u;
+   }
+}
+#define STYPE(lit) stype(lit, sizeof(lit) - 1)
+
+static void sbeeb(const void *data, size_t len)
+{
+   const uint8_t *p = data;
+   for (size_t i = 0; i < len; i++) {
+      tnd_sh_io_t io; sh_newio(&io);
+      tnd_shell_beeb(&sh, p[i], snow, &io);
+      sh_take(&io);
+      snow += 100u;
+   }
+}
+#define SBEEB(lit) sbeeb(lit, sizeof(lit) - 1)
+
+static void stick(uint32_t advance)
+{
+   uint32_t end = snow + advance;
+   while (snow < end) {                          /* the daemon's passes, every 5 ms here */
+      uint32_t step = end - snow < 5000u ? end - snow : 5000u;
+      tnd_sh_io_t io; sh_newio(&io);
+      snow += step;
+      tnd_shell_tick(&sh, snow, &io);
+      sh_take(&io);
+   }
+}
+
+static bool skeys_are(const char *expect, size_t len)
+{
+   return nskey == len && memcmp(skey, expect, len) == 0;
+}
+#define SKEYS(lit) skeys_are(lit, sizeof(lit) - 1)
+
+static bool sline_is(const char *expect)
+{
+   return sh.len == strlen(expect) && memcmp(sh.line, expect, sh.len) == 0;
+}
+
+/* The client's screen, roughly: what is left after the escape sequences are taken out. */
+static const char *scli_text(void)
+{
+   static char t[1 << 18];
+   size_t n = 0;
+   for (size_t i = 0; i < nscli; i++) {
+      if (scli[i] == 27 && i + 1 < nscli && scli[i + 1] == '[') {
+         i += 2;
+         while (i < nscli && !(scli[i] >= 0x40 && scli[i] <= 0x7E)) i++;
+         continue;
+      }
+      t[n++] = (char)scli[i];
+   }
+   t[n] = 0;
+   return t;
+}
+
+static bool scli_has(const char *needle)
+{
+   size_t n = strlen(needle);
+   for (size_t i = 0; i + n <= nscli; i++)
+      if (memcmp(scli + i, needle, n) == 0) return true;
+   return false;
+}
+
+static void sdump(void)
+{
+   printf("    state %u line [%.*s] cur %u keys:", sh.state, sh.len, sh.line, sh.cur);
+   for (size_t i = 0; i < nskey; i++) printf(" %02X", skey[i]);
+   printf("\n    cli: %s\n", scli_text());
+}
+
+static void test_shell_in_keys(void)
+{
+   tnd_in_t s; tnd_in_reset(&s); in_reset();
+   s.edit_keys = true;
+   FEED(&s, "\x1b[1~\x1b[7~\x1b[H\x1bOH");
+   CHECK(nkeys == 4 && keys[0] == TND_KEY_HOME && keys[3] == TND_KEY_HOME, "shell: Home in its four forms"); if (nkeys != 4) dump();
+   in_reset();
+   FEED(&s, "\x1b[3~\x1b[4~\x1b[F\x1bOF\x7f\x08");
+   CHECK(nkeys == 6 && keys[0] == TND_KEY_DELFWD && keys[1] == 139 && keys[2] == 139 && keys[3] == 139
+         && keys[4] == 127 && keys[5] == 127, "shell: Delete forwards; End (VT220, xterm, SS3); BS and DEL back"); if (nkeys != 6) dump();
+   in_reset();
+   FEED(&s, "\x1b[A\x1b[B\x1b[C\x1b[D\x1bOA");
+   CHECK(nkeys == 5 && keys[0] == 143 && keys[1] == 142 && keys[2] == 141 && keys[3] == 140 && keys[4] == 143, "shell: arrows, CSI and SS3");
+
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\x1b[1~\x1b[3~\x1b[H");
+   CHECK(nkeys == 1 && keys[0] == 127, "screen mode unchanged: Home nothing, Delete is DELETE"); if (nkeys != 1) dump();
+}
+
+static void test_hotkey(void)
+{
+   bool armed = false;
+   CHECK(tnd_hotkey(&armed, 'm') == TND_HOT_NONE && !armed, "an ordinary key");
+   CHECK(tnd_hotkey(&armed, 0x1C) == TND_HOT_SWALLOW && armed, "Ctrl-\\ arms");
+   CHECK(tnd_hotkey(&armed, 'm') == TND_HOT_MODE && !armed, "then m: the mode");
+   (void)tnd_hotkey(&armed, 0x1C);
+   CHECK(tnd_hotkey(&armed, 'T') == TND_HOT_TTX, "then T: teletext");
+   (void)tnd_hotkey(&armed, 0x1C);
+   CHECK(tnd_hotkey(&armed, 0x1C) == TND_HOT_LITERAL && !armed, "Ctrl-\\ twice: one for the Beeb");
+   (void)tnd_hotkey(&armed, 0x1C);
+   CHECK(tnd_hotkey(&armed, 'x') == TND_HOT_SWALLOW && !armed, "anything else: dropped");
+   CHECK(tnd_hotkey(&armed, 'x') == TND_HOT_NONE, "and keys are keys again");
+}
+
+static void test_key_for_char(void)
+{
+   CHECK(tnd_key_for_char('A') == 'A' && tnd_key_for_char(28) == 28 && tnd_key_for_char(0) == 0, "ASCII and controls as they are, not NUL");
+   CHECK(tnd_key_for_char(0x81) == 0x91 && tnd_key_for_char(0x8A) == 0x9A, "&80-&8A: SHIFT and a function key");
+   CHECK(tnd_key_for_char(0x94) == 0xA4 && tnd_key_for_char(0x9A) == 0xAA, "&90-&9A: CTRL and a function key");
+   CHECK(tnd_key_for_char(0x8D) == 0 && tnd_key_for_char(0x9D) == 0 && tnd_key_for_char(0x9F) == 0, "&8B-&8F, &9B-&9F: no key gives them");
+   CHECK(tnd_key_for_char(0xA1) == 0 && tnd_key_for_char(0xC5) == 0, "&A0-&CF: none");
+   CHECK(tnd_key_for_char(0xD3) == 0xD3 && tnd_key_for_char(0xFA) == 0xFA && tnd_key_for_char(0xFF) == 0 && tnd_key_for_char(0xFB) == 0, "&D0-&DA, &E0-&EA, &F0-&FA themselves; not &FF");
+}
+
+static void test_shell_probe_and_line(void)
+{
+   sstart(TND_TTX_RENDERED);
+   STYPE("P");
+   CHECK(sh.state == TND_SH_PROBE && SKEYS("P"), "a quiet Beeb: the key goes as a probe"); if (!SKEYS("P")) sdump();
+   SBEEB("P");
+   CHECK(sh.state == TND_SH_EDIT && SKEYS("P\x7f") && sline_is("P"), "echoed: the editor has it, a DELETE takes it back"); if (!SKEYS("P\x7f")) sdump();
+   CHECK(strcmp(scli_text(), "P") == 0, "the client sees the P (drawn by the editor)"); if (strcmp(scli_text(), "P")) sdump();
+   SBEEB("\x7f");
+   CHECK(strcmp(scli_text(), "P") == 0, "the DELETE's echo is dropped");
+   STYPE("RINT 2+2");
+   CHECK(sline_is("PRINT 2+2") && SKEYS("P\x7f"), "the rest is edited on the Pi, nothing sent"); if (!sline_is("PRINT 2+2")) sdump();
+   nscli = 0;
+   STYPE("\r");
+   CHECK(SKEYS("P\x7fPRINT 2+2\r") && sh.state == TND_SH_IDLE, "RETURN: the line and RETURN to the Beeb"); if (!SKEYS("P\x7fPRINT 2+2\r")) sdump();
+   CHECK(strstr(scli_text(), "PRINT 2+2\r\n") != NULL, "and the client is on a new line"); if (!strstr(scli_text(), "PRINT 2+2\r\n")) sdump();
+   nscli = 0;
+   SBEEB("PRINT 2+2\n\r         4\n\r>");
+   CHECK(strcmp(scli_text(), "         4\r\n>") == 0, "the Beeb's echo is taken out, the answer stays"); if (strcmp(scli_text(), "         4\r\n>")) sdump();
+   CHECK(sh.hn == 1 && sh.hlen[0] == 9, "the line is in the history");
+
+   /* Typed fast: the probe's outcome decides for the keys behind it. */
+   sstart(TND_TTX_RENDERED);
+   STYPE("PRINT 1\r");
+   CHECK(SKEYS("P") && sh.nq == 7, "keys behind a probe wait"); if (!SKEYS("P")) sdump();
+   SBEEB("P");
+   CHECK(SKEYS("P\x7fPRINT 1\r") && sh.state == TND_SH_IDLE, "the echo: the waiting keys are the line, RETURN sends it"); if (!SKEYS("P\x7fPRINT 1\r")) sdump();
+
+   /* A program reading keys: no echo. */
+   sstart(TND_TTX_RENDERED);
+   STYPE("Y");
+   CHECK(sh.state == TND_SH_PROBE, "a probe");
+   STYPE("N");
+   stick(TND_SH_PROBE_US);
+   CHECK(sh.state == TND_SH_PASS && SKEYS("YN"), "no echo in time: keys go straight, the held one too"); if (!SKEYS("YN")) sdump();
+   STYPE("\x1b[A" "Q\r");
+   CHECK(SKEYS("YN\x8fQ\r"), "while passing: the arrow as the Beeb's key, RETURN too"); if (!SKEYS("YN\x8fQ\r")) sdump();
+   stick(TND_SH_PASS_US);
+   CHECK(sh.state == TND_SH_IDLE, "idle again after TND_SH_PASS_US with no keys");
+
+   /* A program that prints something else first. */
+   sstart(TND_TTX_RENDERED);
+   STYPE("Y");
+   SBEEB("GOT 89\n\r");
+   CHECK(sh.state == TND_SH_PASS && strstr(scli_text(), "GOT 89") != NULL, "other output: a program took it"); if (sh.state != TND_SH_PASS) sdump();
+
+   /* A Beeb that is busy printing: keys go straight, no probe. */
+   sstart(TND_TTX_RENDERED);
+   SBEEB("LISTING...");
+   STYPE("A");
+   CHECK(sh.state == TND_SH_PASS && SKEYS("A"), "output just now: straight through");
+
+   /* An editing key at a quiet Beeb opens the editor without a probe. */
+   sstart(TND_TTX_RENDERED);
+   STYPE("\x1b[A");
+   CHECK(sh.state == TND_SH_EDIT && nskey == 0, "Up at a quiet Beeb: the editor, nothing sent");
+   STYPE("\r");
+   CHECK(SKEYS("\r") && strstr(scli_text(), "\r\n"), "an empty line: RETURN alone");
+}
+
+static void sedit_start(const char *text)
+{
+   sstart(TND_TTX_RENDERED);
+   stype("\x1b[D", 3);                           /* Left: into the editor, empty */
+   stype(text, strlen(text));
+}
+
+static void test_shell_editing(void)
+{
+   sedit_start("HELLO");
+   CHECK(sline_is("HELLO") && sh.cur == 5, "typed");
+   STYPE("\x1b[D\x1b[D" "X");
+   CHECK(sline_is("HELXLO") && sh.cur == 4, "left twice, insert mid-line"); if (!sline_is("HELXLO")) sdump();
+   STYPE("\x01" "A");
+   CHECK(sline_is("AHELXLO") && sh.cur == 1, "Ctrl-A, insert at the start");
+   STYPE("\x05" "Z");
+   CHECK(sline_is("AHELXLOZ") && sh.cur == 8, "Ctrl-E, at the end");
+   STYPE("\x1b[1~" "1" "\x1b[4~" "4");
+   CHECK(sline_is("1AHELXLOZ4"), "PuTTY's Home and End"); if (!sline_is("1AHELXLOZ4")) sdump();
+   STYPE("\x1b[H" "\x1b[3~");
+   CHECK(sline_is("AHELXLOZ4") && sh.cur == 0, "xterm Home, VT220 Delete deletes forwards");
+   STYPE("\x1bOF\x7f\x08");
+   CHECK(sline_is("AHELXLO"), "SS3 End, then DEL and BS delete backwards"); if (!sline_is("AHELXLO")) sdump();
+   STYPE("\x1b[D\x1b[D\x1b[D\x0b");
+   CHECK(sline_is("AHEL") && sh.cur == 4, "Ctrl-K: to the end");
+   STYPE("\x1b[D\x15");
+   CHECK(sline_is("L") && sh.cur == 0, "Ctrl-U: to the start");
+   sedit_start("PRINT A B  ");
+   STYPE("\x17");
+   CHECK(sline_is("PRINT A ") , "Ctrl-W: spaces, then the word"); if (!sline_is("PRINT A ")) sdump();
+   STYPE("\x17\x17");
+   CHECK(sline_is(""), "Ctrl-W twice more: empty");
+   STYPE("\x7f\x1b[3~\x1b[D\x1b[C");
+   CHECK(sline_is("") && sh.cur == 0, "editing keys on an empty line do nothing");
+   sedit_start("AB");
+   STYPE("\x02\x02\x06" "x" "\x04");
+   CHECK(sline_is("AxB") || sline_is("Ax"), "Ctrl-B, Ctrl-F, Ctrl-D");
+   CHECK(sline_is("Ax"), "Ctrl-D deletes under the cursor"); if (!sline_is("Ax")) sdump();
+
+   /* A full line: the extra keys are dropped. */
+   sstart(TND_TTX_RENDERED);
+   stype("\x1b[D", 3);
+   for (unsigned i = 0; i < TND_SH_LINE + 10u; i++) stype("x", 1);
+   CHECK(sh.len == TND_SH_LINE, "the line holds TND_SH_LINE characters");
+
+   /* Ctrl-L: the line drawn again. */
+   sedit_start("AB");
+   nscli = 0;
+   STYPE("\x0c");
+   CHECK(strcmp(scli_text(), "AB") == 0 && scli_has("\x1b[K"), "Ctrl-L redraws"); if (strcmp(scli_text(), "AB")) sdump();
+}
+
+static void submit(const char *line)
+{
+   stype("\x1b[D", 3);
+   stype(line, strlen(line));
+   stype("\r", 1);
+   SBEEB("\n\r>");                                /* (no echo: the expectation is given up later) */
+   stick(TND_ECHO_US + 10000u);
+}
+
+static void test_shell_history(void)
+{
+   sstart(TND_TTX_RENDERED);
+   submit("ONE"); submit("TWO"); submit("THREE");
+   CHECK(sh.hn == 3, "three lines");
+   STYPE("\x1b[A");
+   CHECK(sline_is("THREE"), "Up: the newest");
+   STYPE("\x1b[A\x1b[A");
+   CHECK(sline_is("ONE"), "Up twice more: the oldest");
+   nscli = 0;
+   STYPE("\x1b[A");
+   CHECK(sline_is("ONE") && scli_has("\a"), "past the oldest: a bell");
+   STYPE("\x1b[B\x1b[B\x1b[B");
+   CHECK(sline_is(""), "Down past the newest: the line being typed (empty)");
+   STYPE("NEW" "\x1b[A\x1b[B");
+   CHECK(sline_is("NEW"), "a part-typed line comes back under the history");
+   STYPE("\x1b[A" "!" "\r");
+   CHECK(sh.hn == 4 && sh.hlen[0] == 6 && memcmp(sh.hist[0], "THREE!", 6) == 0, "a recalled line edited and sent is a new entry");
+   SBEEB("\n\r>"); stick(TND_ECHO_US + 10000u);
+   submit("TWO");
+   CHECK(sh.hn == 4 && memcmp(sh.hist[0], "TWO", 3) == 0 && memcmp(sh.hist[3], "ONE", 3) == 0, "a repeated line moves to the front, not a copy");
+   submit("");
+   CHECK(sh.hn == 4, "empty lines are not kept");
+   for (unsigned i = 0; i < 40; i++) {
+      char l[8]; snprintf(l, sizeof l, "L%u", i);
+      submit(l);
+   }
+   CHECK(sh.hn == TND_SH_HIST && memcmp(sh.hist[0], "L39", 3) == 0, "bounded: the newest TND_SH_HIST");
+
+   /* Ctrl-R: older lines with what was typed in them. */
+   sstart(TND_TTX_RENDERED);
+   submit("PRINT 1"); submit("LIST"); submit("PRINT 2"); submit("RUN");
+   stype("\x1b[D", 3);
+   STYPE("PRI\x12");
+   CHECK(sline_is("PRINT 2"), "Ctrl-R: the newest with PRI"); if (!sline_is("PRINT 2")) sdump();
+   STYPE("\x12");
+   CHECK(sline_is("PRINT 1"), "again: the next older");
+   nscli = 0;
+   STYPE("\x12");
+   CHECK(sline_is("PRINT 1") && scli_has("\a"), "none older: a bell");
+   STYPE("\x1b[B\x1b[B\x1b[B\x1b[B");
+   CHECK(sline_is("PRI"), "Down to the end: back to what was typed");
+}
+
+static void test_shell_ctrlv(void)
+{
+   sedit_start("A");
+   STYPE("\x16" "81" "B" "\x16" "9d" "\x16" "zz");
+   CHECK(sh.len == 4 && sh.line[1] == 0x81 && sh.line[2] == 'B' && sh.line[3] == 'z', "Ctrl-V 81: &81; &9D (no key gives it) and Ctrl-V z refused"); if (sh.len != 4) sdump();
+   CHECK(scli_has("\a"), "with a bell");
+   nscli = 0;
+   STYPE("\x1b[D\x1b[D\x0c");
+   CHECK(scli_has("\x1b[31m\xe2\x96\x88\x1b[39m"), "the code shown as its marker, a red block"); if (!scli_has("\x1b[31m")) sdump();
+   nskey = 0;
+   STYPE("\r");
+   CHECK(SKEYS("A\x91" "Bz\r"), "sent as the key that gives &81: SHIFT f1 (&91)"); if (!SKEYS("A\x91" "Bz\r")) sdump();
+   nscli = 0;
+   SBEEB("A\x81" "Bz\n\r>");
+   CHECK(strcmp(scli_text(), ">") == 0, "the echo is &81 itself, and is taken out"); if (strcmp(scli_text(), ">")) sdump();
+}
+
+static void test_shell_redraw(void)
+{
+   sedit_start("PRI");
+   nscli = 0;
+   SBEEB("TICK\n\r");
+   CHECK(scli_has("\x1b[3D\x1b[K" "TICK\r\n"), "output while typing: the edit line comes off first"); if (!scli_has("\x1b[3D\x1b[K")) sdump();
+   CHECK(!sh.shown, "and is not shown meanwhile");
+   stick(TND_SH_REDRAW_US / 2u);
+   CHECK(!sh.shown, "not while the output may go on");
+   stick(TND_SH_REDRAW_US);
+   CHECK(sh.shown && strcmp(scli_text(), "TICK\r\nPRI") == 0, "once quiet: drawn again under it"); if (strcmp(scli_text(), "TICK\r\nPRI")) sdump();
+   STYPE("NT");
+   CHECK(sline_is("PRINT"), "and editing carries on");
+
+   /* ESCAPE: the line goes, the request is made. */
+   sedit_start("PRINT");
+   STYPE("\x03");
+   CHECK(sesc == 1 && sh.state == TND_SH_IDLE && sh.len == 0, "Ctrl-C: ESCAPE, the line dropped");
+   sedit_start("PRINT");
+   STYPE("\x1b");
+   stick(TND_ESC_US + 1000u);
+   {  /* a lone ESC, after the wait */
+      uint8_t k[TND_IN_KEYS];
+      size_t n = tnd_in_tick(&shin, snow, k);
+      for (size_t j = 0; j < n; j++) { tnd_sh_io_t io; sh_newio(&io); tnd_shell_key(&sh, k[j], snow, &io); sh_take(&io); }
+   }
+   CHECK(sesc == 1 && sh.len == 0, "a lone ESC: ESCAPE too");
+}
+
+static void test_line_teletext_styles(void)
+{
+   tnd_line_t s;
+   uint8_t d[TND_LINE_GLYPH_MAX];
+
+   CHECK(tnd_marker(0x81, true, d) == 13 && memcmp(d, "\x1b[31m\xe2\x96\x88\x1b[39m", 13) == 0, "marker: alpha red, a red block");
+   CHECK(tnd_marker(0x94, true, d) == 13 && memcmp(d, "\x1b[34m\xe2\x96\x92\x1b[39m", 13) == 0, "marker: graphics blue, a shaded block");
+   CHECK(tnd_marker(0x8D, true, d) == 10 && memcmp(d, "\x1b[7m" "2" "\x1b[27m", 10) == 0, "marker: double height, a reversed 2");
+   CHECK(tnd_marker(0x9D, true, d) == 10 && d[4] == 'B', "marker: new background, B");
+   CHECK(tnd_marker(0x81, false, d) == 11 && d[5] == '#', "marker, no UTF-8: #");
+   CHECK(tnd_marker(96, true, d) == 2 && d[0] == 0xC2, "the pound sign");
+
+   /* Markers: the columns kept. */
+   lstart(&s, 7); tnd_line_ttx(&s, TND_TTX_MARKERS);
+   nlout = 0;
+   LFEED(&s, "10 PRINT \"\x81" "RED\x8d" "BIG\"\n\r");
+   {
+      char t[256]; size_t n = 0;
+      for (size_t i = 0; i < nlout; i++) {
+         if (lout[i] == 27) { while (i < nlout && !(lout[i] >= 0x40 && lout[i] <= 0x7E && lout[i] != '[')) i++; continue; }
+         if ((lout[i] & 0xC0) == 0x80) continue;     /* UTF-8 continuation: one column */
+         t[n++] = (char)lout[i];
+      }
+      t[n] = 0;
+      CHECK(strcmp(t, "10 PRINT \"\xe2RED2BIG\"\r\n") == 0, "markers keep each code's column"); if (strcmp(t, "10 PRINT \"\xe2RED2BIG\"\r\n")) ldump();
+   }
+
+   /* Rendered: the codes take effect. */
+   lstart(&s, 7); tnd_line_ttx(&s, TND_TTX_RENDERED);
+   LCHECK(&s, "\x81RED\x82GRN\n\r", " \x1b[0;31mRED \x1b[0;32mGRN\x1b[0m\r\n", "rendered: colour from the next cell, reset at the end of the line");
+   LCHECK(&s, "\x94\x7e\x2c" "A\n\r", " \x1b[0;34m\xf0\x9f\xac\xbb\xf0\x9f\xac\x8b" "A\x1b[0m\r\n", "rendered: mosaics as sextants, capitals blast through");
+   LCHECK(&s, "#_`\n\r", "#\xe2\x80\x95\xc2\xa3\r\n", "rendered: # _ and the pound as MODE 7 shows them");
+   LCHECK(&s, "\x81\x9d" "X\n\r", " \x1b[0;31;41m X\x1b[0m\r\n" , "rendered: new background");
+   /* the Beeb's 40-column rows: a new row starts plain */
+   {
+      char row[64];
+      memset(row, 'a', 39); row[0] = (char)0x81; row[39] = 'b';
+      nlout = 0;
+      lfeed(&s, row, 40);
+      LFEED(&s, "c");
+      CHECK(nlout > 0 && lout[nlout - 1] == 'c' && memcmp(lout + nlout - 5, "\x1b[0m", 4) == 0, "row 2 of a wrapped line starts plain"); if (lout[nlout - 1] != 'c') ldump();
+   }
+   /* plain: tnd_line_plain resets the colours for someone else's text */
+   lstart(&s, 7); tnd_line_ttx(&s, TND_TTX_RENDERED);
+   nlout = 0; LFEED(&s, "\x81X");
+   CHECK(tnd_line_plain(&s, d) == 4 && tnd_line_plain(&s, d) == 0, "plain once, then nothing to do");
+   nlout = 0; LFEED(&s, "Y");
+   CHECK(nlout > 1 && lout[0] == 27, "and the colour comes back before the next text");
+
+   /* Spaces (raw line mode): unchanged. */
+   lstart(&s, 7);
+   LCHECK(&s, "\x81" "RED\n\r", " RED\r\n", "spaces: as before");
+}
+
+static void test_shell_robustness(void)
+{
+   unsigned seed = 99;
+   static const char *seqs[] = { "\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D", "\x1b[1~", "\x1b[3~", "\x1b[4~",
+                                 "\x01", "\x05", "\x0b", "\x15", "\x17", "\x12", "\x16", "\r", "\x7f", "\x0c" };
+   for (unsigned ttx = 0; ttx < 3; ttx++) {
+      sstart((uint8_t)ttx);
+      for (unsigned i = 0; i < 30000; i++) {
+         seed = seed * 1103515245u + 12345u;
+         unsigned r = seed >> 16;
+         nscli = nskey = 0;
+         if ((r & 7u) == 0u) {
+            const char *q = seqs[(r >> 3) % (sizeof seqs / sizeof seqs[0])];
+            stype(q, strlen(q));
+         } else if ((r & 7u) < 4u) {
+            uint8_t c = (uint8_t)(32u + (r >> 4) % 95u);
+            stype(&c, 1);
+         } else if ((r & 7u) < 7u) {
+            uint8_t c = (uint8_t)(r >> 5);
+            sbeeb(&c, 1);
+         } else {
+            stick((r >> 4) % 400000u);
+         }
+         for (size_t j = 0; j < nscli; j++)
+            if (scli[j] == 0xFF) { CHECK(0, "0xFF to the client"); return; }
+         CHECK(sh.len <= TND_SH_LINE && sh.cur <= sh.len && sh.nq <= TND_SH_QUEUE && sh.hn <= TND_SH_HIST, "editor state stays sane");
+      }
+   }
+   CHECK(true, "shell fuzz ran");
+}
+
 int main(void)
 {
    test_plain_keys();
@@ -1402,6 +1858,16 @@ int main(void)
    test_line_echo();
    test_line_ga();
    test_line_robustness();
+   test_shell_in_keys();
+   test_hotkey();
+   test_key_for_char();
+   test_shell_probe_and_line();
+   test_shell_editing();
+   test_shell_history();
+   test_shell_ctrlv();
+   test_shell_redraw();
+   test_line_teletext_styles();
+   test_shell_robustness();
 
    printf("%d checks, %d failed\n", checks, failures);
    return failures ? 1 : 0;

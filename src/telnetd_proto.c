@@ -152,16 +152,20 @@ static uint8_t arrow(uint8_t f)
    }
 }
 
-/* The final byte of ESC [ params f. */
+/* The final byte of ESC [ params f.  Shell mode (edit_keys) also has Home (ESC [ 1 ~,
+   ESC [ 7 ~, ESC [ H) and Delete as the key that deletes forwards (ESC [ 3 ~). */
 static uint8_t csi_key(const tnd_in_t *s, uint8_t f)
 {
    if (f == '~') {
       switch (s->param[0]) {
-      case 3: return 127u;
+      case 3: return s->edit_keys ? TND_KEY_DELFWD : 127u;
       case 4: case 8: return 139u;                /* End: COPY */
+      case 1: case 7: return s->edit_keys ? TND_KEY_HOME : 0u;
       default: return fkey_csi(s->param[0]);
       }
    }
+   if (f == 'H' && s->edit_keys)
+      return TND_KEY_HOME;
    return arrow(f);
 }
 
@@ -342,7 +346,7 @@ size_t tnd_in_byte(tnd_in_t *s, uint8_t c, uint32_t now_us,
          return 1u;
       }
       {
-         uint8_t k = arrow(c);
+         uint8_t k = (c == 'H' && s->edit_keys) ? TND_KEY_HOME : arrow(c);
          if (k != 0u) {
             keys[0] = k;
             return 1u;
@@ -733,13 +737,21 @@ static void ttx_state(const tnd_out_t *s, unsigned y, unsigned x, ttx_t *t)
       ttx_step(t, s->ch[y][i], &cp, &fg, &bg, &fl);
 }
 
+static size_t put_cp(bool utf8, uint8_t *dst, uint32_t cp);
+
 static size_t ttx_put_cp(const tnd_out_t *s, uint8_t *dst, uint32_t cp)
+{
+   return put_cp(s->utf8, dst, cp);
+}
+
+/* A character as UTF-8, or Latin-1 / the nearest ASCII. */
+static size_t put_cp(bool utf8, uint8_t *dst, uint32_t cp)
 {
    if (cp < 0x80u) {
       dst[0] = (uint8_t)cp;
       return 1u;
    }
-   if (!s->utf8) {
+   if (!utf8) {
       if (cp <= 0xFFu) {
          dst[0] = (uint8_t)cp;
          return 1u;
@@ -1933,11 +1945,77 @@ bool tnd_ga_wanted(const tnd_in_t *s)
    return s->telnet && s->sga_opt != TND_OPT_ON;
 }
 
+#define TSGR_PLAIN 0x07u          /* ttx_sgr's key for the terminal's own colours */
+
+_Static_assert(sizeof(ttx_t) <= sizeof(((tnd_line_t *)0)->tt), "tnd_line_t.tt holds a ttx_t");
+
+static ttx_t *line_tt(tnd_line_t *s)
+{
+   return (ttx_t *)(void *)s->tt;
+}
+
 void tnd_line_reset(tnd_line_t *s, bool utf8, uint8_t mode)
 {
    memset(s, 0, sizeof *s);
    s->utf8 = utf8;
    s->tele = (mode & 7u) == 7u;
+   s->tsgr = TSGR_PLAIN;
+   ttx_init(line_tt(s));
+}
+
+void tnd_line_ttx(tnd_line_t *s, uint8_t ttx_style)
+{
+   s->ttx = ttx_style;
+}
+
+size_t tnd_line_plain(tnd_line_t *s, uint8_t *dst)
+{
+   if (s->tsgr == TSGR_PLAIN)
+      return 0u;
+   s->tsgr = TSGR_PLAIN;
+   return put_str(dst, "\x1b[0m");
+}
+
+/* A teletext control code as a marker: the colour codes as a block in their colour
+   (solid for text, shaded for graphics), the others as a reversed letter:
+      F flash  S steady  [ ] boxes  1 normal  2 double height  C conceal
+      c contiguous  s separated  b black background  B new background  H hold
+      R release  K/k black (not on the SAA5050)  ? unused
+   From &A0 (and outside MODE 7, where the Beeb shows its own characters) the
+   character without bit 7, reversed.  Below &80 the character itself. */
+size_t tnd_marker(uint8_t c, bool utf8, uint8_t *dst)
+{
+   static const char letters[32] = {
+      'K', 0, 0, 0, 0, 0, 0, 0, 'F', 'S', ']', '[', '1', '2', '?', '?',
+      'k', 0, 0, 0, 0, 0, 0, 0, 'C', 'c', 's', '?', 'b', 'B', 'H', 'R'
+   };
+   size_t n = 0u;
+
+   if (c < 0x80u) {
+      if (c == 96u)
+         return put_cp(utf8, dst, 0xA3u);
+      dst[0] = (c >= 32u && c < 127u) ? c : (uint8_t)'?';
+      if (c >= 32u && c < 127u)
+         return 1u;
+      n = put_str(dst, "\x1b[7m");               /* a control character: reversed, as ^ letter */
+      dst[n++] = (uint8_t)(c == 127u ? '?' : '@' + c);
+      return n + put_str(dst + n, "\x1b[27m");
+   }
+   if (c < 0xA0u && letters[c & 31u] == 0) {     /* a colour: a block in it */
+      n = sgr(dst, '3', (uint8_t)(c & 7u));
+      n += put_cp(utf8, dst + n, c < 0x90u ? 0x2588u : 0x2592u);
+      if (!utf8)
+         dst[n - 1u] = c < 0x90u ? (uint8_t)'#' : (uint8_t)'%';
+      return n + put_str(dst + n, "\x1b[39m");
+   }
+   n = put_str(dst, "\x1b[7m");
+   if (c < 0xA0u) {
+      dst[n++] = (uint8_t)letters[c & 31u];
+   } else {
+      uint8_t a = (uint8_t)(c & 0x7Fu);
+      dst[n++] = (a >= 32u && a < 127u) ? a : (uint8_t)'?';
+   }
+   return n + put_str(dst + n, "\x1b[27m");
 }
 
 size_t tnd_line_room(const tnd_line_t *s)
@@ -1969,12 +2047,49 @@ void tnd_line_escape(tnd_line_t *s)
 
 static size_t line_newline(tnd_line_t *s, uint8_t *dst)
 {
+   size_t n = tnd_line_plain(s, dst);           /* colours do not run on into the next line */
+
    s->col = 0u;
    s->cr = false;
    s->gfx = false;
-   dst[0] = '\r';
-   dst[1] = '\n';
-   return 2u;
+   s->rowcol = 0u;
+   ttx_init(line_tt(s));                        /* a teletext row starts plain */
+   dst[n++] = '\r';
+   dst[n++] = '\n';
+   return n;
+}
+
+/* MODE 7, rendered or markers: one character cell, through the screen translator's
+   own teletext rules (ttx_step) - the codes take effect, mosaics after a graphics code
+   are sextants.  The Beeb's rows are 40 cells, and each starts plain. */
+static size_t line_ttx(tnd_line_t *s, uint8_t c, uint8_t *dst)
+{
+   ttx_t   *t = line_tt(s);
+   size_t   n = 0u;
+   uint32_t cp;
+   uint8_t  fg, bg, b = ttx_store(c);
+   bool     flash;
+
+   if (s->cr)
+      n = line_newline(s, dst);
+   if (s->rowcol >= 40u) {                      /* the Beeb wrapped onto a new row */
+      ttx_init(t);
+      s->rowcol = 0u;
+   }
+   if (s->ttx == TND_TTX_MARKERS)
+      t->conceal = false;                       /* markers show what is there */
+   ttx_step(t, b, &cp, &fg, &bg, &flash);
+   if (s->ttx == TND_TTX_MARKERS && b >= 0x80u && b < 0xA0u) {
+      n += tnd_marker(b, s->utf8, dst + n);
+   } else {
+      if (s->ttx == TND_TTX_RENDERED)
+         n += ttx_sgr(&s->tsgr, dst + n, fg, bg, flash);
+      n += put_cp(s->utf8, dst + n, cp);
+   }
+   s->rowcol++;
+   if (s->col < 255u)
+      s->col++;
+   return n;
 }
 
 /* A character that takes a place on the line. */
@@ -2008,6 +2123,10 @@ static size_t line_strip(tnd_line_t *s, uint8_t c, uint8_t *dst)
          s->code = 0u;
          if (code == 22u && !s->disabled && (s->col != 0u || s->cr))
             return line_newline(s, dst);        /* a MODE clears the screen: what follows is a new line */
+         if (code == 22u) {
+            s->rowcol = 0u;
+            ttx_init(line_tt(s));
+         }
       }
       return 0u;
    }
@@ -2052,13 +2171,25 @@ static size_t line_strip(tnd_line_t *s, uint8_t c, uint8_t *dst)
       dst[0] = 8u; dst[1] = ' '; dst[2] = 8u;
       return 3u;
    }
+   if (s->tele && s->ttx != TND_TTX_SPACES)
+      return line_ttx(s, c, dst);
    if (c < 128u) {
       if (s->tele && s->gfx && (c < 0x40u || c >= 0x60u))
          return line_glyph(s, ' ', dst);        /* a mosaic: there is no text in it */
       return line_glyph(s, c, dst);
    }
-   if (!s->tele)                                /* user-defined characters: no text either */
-      return 0u;
+   if (!s->tele) {                              /* user-defined characters: no text either ... */
+      if (s->ttx == TND_TTX_SPACES)
+         return 0u;
+      {                                         /* ... but a marker keeps the columns */
+         size_t n = 0u;
+         if (s->cr)
+            n = line_newline(s, dst);
+         if (s->col < 255u)
+            s->col++;
+         return n + tnd_marker(c, s->utf8, dst + n);
+      }
+   }
    if (c < 0xA0u) {                             /* a teletext control code: a space on the screen */
       if (c >= 0x91u && c <= 0x97u)
          s->gfx = true;
@@ -2169,4 +2300,480 @@ bool tnd_line_ga_due(tnd_line_t *s, uint32_t now_us, bool keys_waiting)
       return false;
    s->ga_armed = false;
    return true;
+}
+
+/* ---- the hot key ---------------------------------------------------------------- */
+
+uint8_t tnd_hotkey(bool *armed, uint8_t key)
+{
+   if (!*armed) {
+      if (key != TND_HOT_KEY)
+         return TND_HOT_NONE;
+      *armed = true;
+      return TND_HOT_SWALLOW;
+   }
+   *armed = false;
+   switch (key) {
+   case TND_HOT_KEY:          return TND_HOT_LITERAL;
+   case 'm': case 'M':        return TND_HOT_MODE;
+   case 't': case 'T':        return TND_HOT_TTX;
+   default:                   return TND_HOT_SWALLOW;
+   }
+}
+
+/* ---- shell mode -------------------------------------------------------------------
+   See the header for who gets a key.  The edit line is drawn where the client's cursor
+   is - after the Beeb's prompt - one column per character (codes as markers).  It is
+   taken off the screen (cursor back to its start, clear to the end of the line) before
+   the Beeb's output is written, so that output lands where the Beeb's cursor is, and
+   drawn again once the output has stopped.  The Beeb's echo of a line sent with RETURN
+   is taken out by the line matcher, as in line mode; the echo of a probe, and of the
+   DELETE that takes it back, by the editor itself. */
+
+uint8_t tnd_key_for_char(uint8_t c)
+{
+   uint8_t lo = (uint8_t)(c & 15u);
+
+   if (c == 0u)
+      return 0u;                                /* the daemon's ESCAPE request, never a key */
+   if (c < 0x80u)
+      return c;
+   if (lo > 10u)
+      return 0u;
+   switch (c & 0xF0u) {
+   case 0x80u: return (uint8_t)(0x90u | lo);   /* SHIFT f0-f10: *FX226 gives &80+n */
+   case 0x90u: return (uint8_t)(0xA0u | lo);   /* CTRL f0-f10: *FX227 gives &90+n */
+   case 0xD0u: case 0xE0u: case 0xF0u:
+      return c == 0xFFu ? 0u : c;
+   default:    return 0u;
+   }
+}
+
+static void io_cli(tnd_sh_io_t *io, const void *p, size_t n)
+{
+   memcpy(io->cli + io->ncli, p, n);
+   io->ncli += n;
+}
+
+static void io_str(tnd_sh_io_t *io, const char *str)
+{
+   io_cli(io, str, strlen(str));
+}
+
+static void io_key(tnd_sh_io_t *io, uint8_t k)
+{
+   if (io->nkeys < TND_SH_KEYS_MAX)
+      io->keys[io->nkeys++] = k;
+}
+
+/* ESC [ n <f>: n columns left or right. */
+static void io_move(tnd_sh_io_t *io, unsigned n, char f)
+{
+   if (n == 0u)
+      return;
+   io->cli[io->ncli++] = 27u;
+   io->cli[io->ncli++] = '[';
+   io->ncli += put_num(io->cli + io->ncli, n);
+   io->cli[io->ncli++] = (uint8_t)f;
+}
+
+void tnd_shell_reset(tnd_shell_t *s, bool utf8, uint8_t mode, uint8_t ttx_style)
+{
+   memset(s, 0, sizeof *s);
+   tnd_line_reset(&s->lm, utf8, mode);
+   tnd_line_ttx(&s->lm, ttx_style);
+   s->utf8 = utf8;
+   s->hpos = -1;
+}
+
+static void sh_hide(tnd_shell_t *s, tnd_sh_io_t *io)
+{
+   if (!s->shown)
+      return;
+   io_move(io, s->shown_cur, 'D');
+   io_str(io, "\x1b[K");
+   s->shown = false;
+}
+
+static void sh_draw(tnd_shell_t *s, tnd_sh_io_t *io)
+{
+   io->ncli += tnd_line_plain(&s->lm, io->cli + io->ncli);
+   for (unsigned i = 0u; i < s->len; i++)
+      io->ncli += tnd_marker(s->line[i], s->utf8, io->cli + io->ncli);
+}
+
+static void sh_show(tnd_shell_t *s, tnd_sh_io_t *io)
+{
+   sh_draw(s, io);
+   io_move(io, (unsigned)(s->len - s->cur), 'D');
+   s->shown = true;
+   s->shown_cur = s->cur;
+}
+
+void tnd_shell_redraw(tnd_shell_t *s, tnd_sh_io_t *io)
+{
+   sh_hide(s, io);
+   if (s->state == TND_SH_EDIT)
+      sh_show(s, io);
+}
+
+static void sh_load(tnd_shell_t *s, const uint8_t *p, uint16_t n)
+{
+   memcpy(s->line, p, n);
+   s->len = s->cur = n;
+}
+
+static void sh_history_add(tnd_shell_t *s)
+{
+   unsigned i, n = s->hn;
+
+   if (s->len == 0u)
+      return;
+   for (i = 0u; i < n; i++)                     /* the same line again: it moves to the front */
+      if (s->hlen[i] == s->len && memcmp(s->hist[i], s->line, s->len) == 0)
+         break;
+   if (i == n) {
+      if (n < TND_SH_HIST)
+         s->hn++;
+      i = s->hn - 1u;
+   }
+   for (; i > 0u; i--) {
+      memcpy(s->hist[i], s->hist[i - 1u], s->hlen[i - 1u]);
+      s->hlen[i] = s->hlen[i - 1u];
+   }
+   memcpy(s->hist[0], s->line, s->len);
+   s->hlen[0] = s->len;
+}
+
+/* Up, Down, Ctrl-R: a history line in the edit line.  The line being typed is kept
+   while the history is shown, and comes back below the newest. */
+static void sh_hist_go(tnd_shell_t *s, int16_t to)
+{
+   if (s->hpos < 0) {
+      memcpy(s->saved, s->line, s->len);
+      s->savedlen = s->len;
+   }
+   s->hpos = to;
+   if (to < 0)
+      sh_load(s, s->saved, s->savedlen);
+   else
+      sh_load(s, s->hist[to], s->hlen[to]);
+}
+
+/* Ctrl-R: the next older history line that has what was being typed in it. */
+static bool sh_search(tnd_shell_t *s)
+{
+   const uint8_t *term = s->hpos < 0 ? s->line : s->saved;
+   uint16_t       tn = s->hpos < 0 ? s->len : s->savedlen;
+
+   for (int16_t i = (int16_t)(s->hpos + 1); i < (int16_t)s->hn; i++) {
+      const uint8_t *h = s->hist[i];
+      for (unsigned at = 0u; at + tn <= s->hlen[i]; at++)
+         if (memcmp(h + at, term, tn) == 0) {
+            sh_hist_go(s, i);
+            return true;
+         }
+   }
+   return false;
+}
+
+static void sh_insert(tnd_shell_t *s, uint8_t c)
+{
+   if (s->len >= TND_SH_LINE)
+      return;
+   memmove(s->line + s->cur + 1u, s->line + s->cur, (size_t)(s->len - s->cur));
+   s->line[s->cur++] = c;
+   s->len++;
+}
+
+static void sh_delete(tnd_shell_t *s, uint16_t from, uint16_t to)
+{
+   memmove(s->line + from, s->line + to, (size_t)(s->len - to));
+   s->len = (uint16_t)(s->len - (to - from));
+   s->cur = from;
+}
+
+static int hexval(uint8_t c)
+{
+   if (c >= '0' && c <= '9') return c - '0';
+   if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+   if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+   return -1;
+}
+
+/* RETURN: the line to the Beeb, its echo expected, the client on a new line. */
+static void sh_submit(tnd_shell_t *s, uint32_t now_us, tnd_sh_io_t *io)
+{
+   sh_hide(s, io);
+   sh_draw(s, io);
+   io_str(io, "\r\n");
+   for (unsigned i = 0u; i < s->len; i++) {
+      io_key(io, tnd_key_for_char(s->line[i]));
+      tnd_line_typed(&s->lm, s->line[i], now_us);
+   }
+   io_key(io, 13u);
+   tnd_line_typed(&s->lm, 13u, now_us);
+   s->lm.col = 0u;
+   s->lm.cr = false;
+   sh_history_add(s);
+   s->len = s->cur = 0u;
+   s->hpos = -1;
+   s->state = TND_SH_IDLE;
+}
+
+/* A key for the editor: the line changes, and is drawn again. */
+static void sh_edit(tnd_shell_t *s, uint8_t k, uint32_t now_us, tnd_sh_io_t *io)
+{
+   if (s->ctrlv != 0u) {                        /* Ctrl-V and two hex digits: that byte */
+      int v = hexval(k);
+      if (v < 0) {
+         s->ctrlv = 0u;
+         io_str(io, "\a");
+      } else if (s->ctrlv == 1u) {
+         s->vhi = (uint8_t)v;
+         s->ctrlv = 2u;
+      } else {
+         uint8_t c = (uint8_t)(((unsigned)s->vhi << 4) | (unsigned)v);
+         s->ctrlv = 0u;
+         if (tnd_key_for_char(c) != 0u)
+            sh_insert(s, c);
+         else
+            io_str(io, "\a");                    /* no key gives it: CHR$ in the program instead */
+      }
+      return;
+   }
+   switch (k) {
+   case 13u:
+      sh_submit(s, now_us, io);
+      return;
+   case 127u: case 8u:
+      if (s->cur != 0u)
+         sh_delete(s, (uint16_t)(s->cur - 1u), s->cur);
+      break;
+   case TND_KEY_DELFWD: case 4u:
+      if (s->cur < s->len)
+         sh_delete(s, s->cur, (uint16_t)(s->cur + 1u));
+      break;
+   case 140u: case 2u:                          /* left, Ctrl-B */
+      if (s->cur != 0u)
+         s->cur--;
+      break;
+   case 141u: case 6u:                          /* right, Ctrl-F */
+      if (s->cur < s->len)
+         s->cur++;
+      break;
+   case TND_KEY_HOME: case 1u:
+      s->cur = 0u;
+      break;
+   case 139u: case 5u:                          /* End (COPY's key in screen mode), Ctrl-E */
+      s->cur = s->len;
+      break;
+   case 11u:                                    /* Ctrl-K: to the end */
+      s->len = s->cur;
+      break;
+   case 21u:                                    /* Ctrl-U: to the start */
+      sh_delete(s, 0u, s->cur);
+      break;
+   case 23u: {                                  /* Ctrl-W: the word before the cursor */
+      uint16_t from = s->cur;
+      while (from > 0u && s->line[from - 1u] == ' ')
+         from--;
+      while (from > 0u && s->line[from - 1u] != ' ')
+         from--;
+      sh_delete(s, from, s->cur);
+      break;
+   }
+   case 143u:                                   /* up: older */
+      if (s->hpos + 1 < (int)s->hn)
+         sh_hist_go(s, (int16_t)(s->hpos + 1));
+      else
+         io_str(io, "\a");
+      break;
+   case 142u:                                   /* down: newer, then the line being typed */
+      if (s->hpos >= 0)
+         sh_hist_go(s, (int16_t)(s->hpos - 1));
+      break;
+   case 18u:                                    /* Ctrl-R */
+      if (!sh_search(s))
+         io_str(io, "\a");
+      break;
+   case 22u:
+      s->ctrlv = 1u;
+      return;
+   case TND_KEY_REFRESH:
+      break;
+   default:
+      if ((k >= 32u && k < 127u))
+         sh_insert(s, k);
+      else
+         return;                                /* function keys, other controls: not in a line */
+      break;
+   }
+   sh_hide(s, io);
+   sh_show(s, io);
+}
+
+/* Is k a key that edits (rather than a character)? */
+static bool sh_editing_key(uint8_t k)
+{
+   switch (k) {
+   case 1u: case 2u: case 4u: case 5u: case 6u: case 11u: case 13u: case 18u: case 21u:
+   case 22u: case 23u: case 127u: case 8u:
+   case 139u: case 140u: case 141u: case 142u: case 143u:
+   case TND_KEY_HOME: case TND_KEY_DELFWD:
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* The key as screen mode would send it, for a program reading keys. */
+static void sh_pass(tnd_shell_t *s, uint8_t k, uint32_t now_us, tnd_sh_io_t *io)
+{
+   s->key_us = now_us;
+   if (k == TND_KEY_DELFWD)
+      k = 127u;
+   if (k == TND_KEY_HOME || k == TND_KEY_REFRESH)
+      return;
+   io_key(io, k);
+}
+
+static void sh_to_pass(tnd_shell_t *s, uint32_t now_us, tnd_sh_io_t *io)
+{
+   s->state = TND_SH_PASS;
+   for (unsigned i = 0u; i < s->nq; i++)
+      sh_pass(s, s->queue[i], now_us, io);
+   s->nq = 0u;
+   s->key_us = now_us;
+}
+
+static void sh_dispatch(tnd_shell_t *s, uint8_t k, uint32_t now_us, tnd_sh_io_t *io);
+
+/* The probe was echoed: the Beeb is in its line editor, and the editor takes over. */
+static void sh_to_edit(tnd_shell_t *s, uint32_t now_us, tnd_sh_io_t *io)
+{
+   uint8_t q[TND_SH_QUEUE], nq = s->nq;
+
+   s->state = TND_SH_EDIT;
+   s->len = s->cur = 0u;
+   s->hpos = -1;
+   sh_insert(s, s->probe);
+   io_key(io, 127u);                            /* the probe out of the Beeb's line again */
+   s->del_echo = true;
+   memcpy(q, s->queue, nq);
+   s->nq = 0u;
+   sh_hide(s, io);
+   sh_show(s, io);
+   for (unsigned i = 0u; i < nq; i++)
+      sh_dispatch(s, q[i], now_us, io);
+}
+
+static bool sh_quiet(const tnd_shell_t *s, uint32_t now_us)
+{
+   return (uint32_t)(now_us - s->lm.out_us) >= TND_SH_QUIET_US;
+}
+
+static void sh_dispatch(tnd_shell_t *s, uint8_t k, uint32_t now_us, tnd_sh_io_t *io)
+{
+   switch (s->state) {
+   case TND_SH_EDIT:
+      sh_edit(s, k, now_us, io);
+      return;
+   case TND_SH_PROBE:
+      if (s->nq < TND_SH_QUEUE) {
+         s->queue[s->nq++] = k;
+      } else {                                  /* typing faster than the Beeb answers: a program */
+         sh_to_pass(s, now_us, io);
+         sh_pass(s, k, now_us, io);
+      }
+      return;
+   case TND_SH_PASS:
+      sh_pass(s, k, now_us, io);
+      return;
+   default:
+      break;
+   }
+   /* Idle: a quiet Beeb is probably waiting for a line. */
+   if (k >= 32u && k < 127u && sh_quiet(s, now_us)) {
+      s->state = TND_SH_PROBE;
+      s->probe = k;
+      s->probe_us = now_us;
+      s->nq = 0u;
+      io_key(io, k);
+   } else if (sh_editing_key(k) && sh_quiet(s, now_us)) {
+      s->state = TND_SH_EDIT;
+      s->len = s->cur = 0u;
+      s->hpos = -1;
+      sh_edit(s, k, now_us, io);
+   } else {
+      s->state = TND_SH_PASS;
+      sh_pass(s, k, now_us, io);
+   }
+}
+
+void tnd_shell_key(tnd_shell_t *s, uint8_t key, uint32_t now_us, tnd_sh_io_t *io)
+{
+   if (key == TND_KEY_ESCAPE) {                 /* the line goes, the Beeb gets ESCAPE */
+      if (s->shown) {
+         io_move(io, (unsigned)(s->len - s->shown_cur), 'C');
+         s->shown = false;
+      }
+      s->len = s->cur = 0u;
+      s->nq = 0u;
+      s->ctrlv = 0u;
+      s->hpos = -1;
+      s->state = TND_SH_IDLE;
+      s->del_echo = false;
+      tnd_line_escape(&s->lm);
+      io->escape = true;
+      return;
+   }
+   sh_dispatch(s, key, now_us, io);
+}
+
+void tnd_shell_beeb(tnd_shell_t *s, uint8_t c, uint32_t now_us, tnd_sh_io_t *io)
+{
+   bool idle = s->lm.code == 0u && !s->lm.disabled;   /* not a VDU parameter */
+
+   if (idle && s->state == TND_SH_PROBE) {
+      if (c == s->probe) {                      /* its echo: a line editor is reading */
+         s->lm.out_us = now_us;
+         sh_to_edit(s, now_us, io);
+         return;
+      }
+      sh_to_pass(s, now_us, io);                /* a program took it */
+   }
+   if (idle && s->del_echo) {
+      s->del_echo = false;
+      if (c == 127u) {
+         s->lm.out_us = now_us;
+         return;
+      }
+   }
+   {
+      uint8_t d[TND_LINE_OUT_MAX];
+      size_t  n = tnd_line_beeb(&s->lm, c, now_us, d);
+      if (n != 0u) {
+         sh_hide(s, io);
+         io_cli(io, d, n);
+      }
+   }
+}
+
+void tnd_shell_tick(tnd_shell_t *s, uint32_t now_us, tnd_sh_io_t *io)
+{
+   uint8_t d[TND_LINE_OUT_MAX];
+   size_t  n = tnd_line_tick(&s->lm, now_us, d);
+
+   if (n != 0u) {
+      sh_hide(s, io);
+      io_cli(io, d, n);
+   }
+   if (s->state == TND_SH_PROBE && (uint32_t)(now_us - s->probe_us) >= TND_SH_PROBE_US)
+      sh_to_pass(s, now_us, io);                /* no echo: a program took it */
+   if (s->state == TND_SH_PASS && (uint32_t)(now_us - s->key_us) >= TND_SH_PASS_US)
+      s->state = TND_SH_IDLE;
+   if (s->state == TND_SH_EDIT && !s->shown     /* the Beeb's output has stopped: the line again */
+       && (uint32_t)(now_us - s->lm.out_us) >= TND_SH_REDRAW_US)
+      sh_show(s, io);
 }
