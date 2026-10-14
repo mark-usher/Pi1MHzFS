@@ -52,7 +52,7 @@ CMDPTR = &F2                \ service call 4: the command line, and Y its offset
 HELPER_ENTRY = &FC88        \ the helper window: STX &FC88 / NOP / JMP &FD00
 HELPER_OPCODE = &8E         \ the Pi writes STX abs here, so it is there only if a Pi1MHz answers
 TELNET_HELPER = 20
-BUILD = 5             \ the build number in the version string, so *HELP says which image is fitted
+BUILD = 6             \ the build number in the version string, so *HELP says which image is fitted
 INSV = &022A                \ the MOS vectors: keyboard buffer insertion ...
 IRQ1V = &0204               \ ... and the interrupt
 REMV = &022C                \ buffer remove, vector 22: foreground code polls it while it waits for a key
@@ -62,6 +62,8 @@ SCANKEY = &FF               \ the byte the Pi puts in the keyboard buffer to ask
 STUBPAGE = &FC              \ the stub's page (FRED); only a test build, in RAM, changes it
 STUB = &FCCC                \ the Pi's serial stub at its default place (src/serial_redirect.c)
 POWER_ON = 1                \ OSBYTE &FD: 0 soft BREAK, 1 power-on, 2 CTRL-BREAK
+SOFT_BREAK = 0              \ OSBYTE &FD: a soft reset (the BREAK key, or a jump through the reset vector)
+TUBE_ULA = &FEE0            \ the Tube ULA's status register: write &80+flags to set, flags to clear
 WAIT_TURNS = 40             \ x about 0.16 s at 2 MHz: a little over 6 seconds
 
 ORG &8000
@@ -108,7 +110,13 @@ GUARD &C000
                 ldx #0
                 ldy #&FF
                 jsr OSBYTE                  \ X = 0, 1 or 2
-                cpx #POWER_ON
+                cpx #SOFT_BREAK
+                bne notsoft
+                lda #&A0                    \ a reset in software (CALL !-4, the telnet F12) did not
+                sta TUBE_ULA                \ reset a second processor as the BREAK key does, and the
+                lda #&20                    \ Tube's start would wait for it for ever: the Tube ULA's
+                sta TUBE_ULA                \ parasite reset (flag P) on and off.  No Tube: nothing there
+.notsoft        cpx #POWER_ON
                 bne probe                   \ the Pi is already up
                 lda #WAIT_TURNS
                 pha                         \ turns left, on the stack: nothing else is ours

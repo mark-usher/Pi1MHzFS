@@ -363,6 +363,13 @@ def main(path):
     check(m[STUBA + 0x0A] == 0x34 and (m[0x22A], m[0x22B]) == (0xCC, 0xFC) and [v for a_, v in r["writes"]][:3] == [0x85, 0xE9, 0x17],
           "stub already hooked: the stashed vectors are not overwritten, and the Pi still gets the report")
 
+    # 1c. a soft reset (CALL !-4, the telnet F12) resets a second processor as the BREAK key would:
+    # the Tube ULA's parasite reset flag on and off; power-on and CTRL-BREAK reset it in hardware
+    for rt, want in ((0, [(0xFEE0, 0xA0), (0xFEE0, 0x20)]), (1, []), (2, [])):
+        r = call(rom, 1, 9, 2, pi_after=0, reset_type=rt, watch=(0xFEE0,))
+        check(r["writes"] == want, f"reset type {rt}: the parasite reset pulse {'given' if want else 'not given'} ({r['writes']})")
+        check(r["regs"] == (1, 9, 2) and r["sp_after"] == r["sp_before"], f"reset type {rt}: registers and stack given back")
+
     # 2. power-on: the Pi comes up while the ROM waits
     for after in (0, 1, 7, WAIT_TURNS - 1):
         r = call(rom, 1, 9, 2, pi_after=after, reset_type=1)
