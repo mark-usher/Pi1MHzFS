@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Fake the Pi: run the telnet daemon's byte logic against a real BBC MOS and BASIC.
 
+This is the light fallback: its own Python 6502.  The primary harness is
+beebium_run.py (the Beebium emulator); both run the same transcript checks (scripted).
+
     python3 run.py --roms DIR            the scripted transcript checks (exit 1 on a failure)
     python3 run.py --roms DIR --listen 2323 [--setting auto|screen|line]
                                          a live session: nc localhost 2323, or telnet
@@ -77,6 +80,9 @@ class Rig:
             self.hooked = True
             self.stub.install(b.mem)
             self.stub.rx.extend(b"*FX3,1\r")    # the VDU stream to RS423 as well
+
+    def seconds(self):
+        return self.beeb.us / 1e6
 
     @property
     def now(self):
@@ -195,12 +201,10 @@ def transcript(r, lines, title):
     return out
 
 
-def scripted(roms, lib):
+def scripted(r):
+    """The transcript checks, on a booted rig (this file's, or beebium_run.py's)."""
     ck = Checks()
-
-    r = Rig(roms, lib)
-    r.boot()
-    print(f"booted: hooked at {r.beeb.us / 1e6:.2f} s of Beeb time")
+    print(f"booted: hooked at {r.seconds():.2f} s of Beeb time")
 
     # 1. A raw client (nc): line mode as soon as it types.
     r.connect("auto")
@@ -303,7 +307,7 @@ def scripted(roms, lib):
     got = r.transact("PRINT 1")
     ck.check(got == b"         1\r\n>", "and line mode works", got)
 
-    print(f"{ck.n} checks, {ck.failed} failed; {r.beeb.us / 1e6:.1f} s of Beeb time")
+    print(f"{ck.n} checks, {ck.failed} failed; {r.seconds():.1f} s of Beeb time")
     return ck.failed == 0
 
 
@@ -351,7 +355,9 @@ def main():
     lib = build_shim()
     if a.listen:
         listen(a.roms, lib, a.listen, a.setting)
-    sys.exit(0 if scripted(a.roms, lib) else 1)
+    r = Rig(a.roms, lib)
+    r.boot()
+    sys.exit(0 if scripted(r) else 1)
 
 
 if __name__ == "__main__":

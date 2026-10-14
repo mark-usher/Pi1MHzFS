@@ -166,3 +166,72 @@ int fp_out(uint8_t *buf, int max)
 int fp_escape(void) { int e = g_escape; g_escape = 0; return e; }
 int fp_mode(void)   { return g_sm; }
 int fp_keys(void)   { return (int)(g_kt - g_kh); }
+
+#ifdef FAKEPI_MAIN
+/* The same, as a program on a pipe, for a driver that cannot load a shared library
+   built here (beebium_run.py: Windows Python, this built in WSL).  One command a line,
+   one answer a line:
+      S <setting> <mode> <now>           start a session
+      C <now> <hex>                      bytes from the client
+      P <now> <room> <hex>               the Beeb's output since the last poll, and the poll
+   answer: <beeb bytes taken> <keys hex or -> <client bytes hex or -> <escape> <mode> <keys queued> */
+#include <stdio.h>
+#include <stdlib.h>
+
+static size_t unhex(const char *h, uint8_t *dst, size_t max)
+{
+   size_t n = 0;
+   while (h[0] && h[1] && h[0] != '-' && n < max) {
+      unsigned v;
+      if (sscanf(h, "%2x", &v) != 1)
+         break;
+      dst[n++] = (uint8_t)v;
+      h += 2;
+   }
+   return n;
+}
+
+static void hexout(const uint8_t *p, size_t n)
+{
+   if (n == 0)
+      putchar('-');
+   for (size_t i = 0; i < n; i++)
+      printf("%02x", p[i]);
+}
+
+int main(void)
+{
+   static char    line[1 << 18];
+   static uint8_t data[1 << 17], keys[2048], out[OUTB];
+
+   setvbuf(stdout, NULL, _IOFBF, 1 << 16);
+   while (fgets(line, sizeof line, stdin)) {
+      unsigned long now = 0, a = 0, b = 0;
+      char  hex[8];
+      int   taken = 0, nk = 0;
+      char *h = NULL;
+
+      if (line[0] == 'S' && sscanf(line + 1, "%lu %lu %lu", &a, &b, &now) == 3) {
+         fp_start((int)a, (int)b, (uint32_t)now);
+      } else if (line[0] == 'C' && sscanf(line + 1, "%lu %7s", &now, hex) >= 1) {
+         h = strchr(line + 2, ' ');
+         size_t n = h ? unhex(h + 1, data, sizeof data) : 0;
+         fp_client(data, (int)n, (uint32_t)now);
+      } else if (line[0] == 'P' && sscanf(line + 1, "%lu %lu", &now, &a) == 2) {
+         h = strchr(line + 2, ' ');
+         h = h ? strchr(h + 1, ' ') : NULL;
+         size_t n = h ? unhex(h + 1, data, sizeof data) : 0;
+         while ((size_t)taken < n && fp_beeb(data[taken], (uint32_t)now))
+            taken++;
+         nk = fp_poll((uint32_t)now, keys, a > sizeof keys ? (int)sizeof keys : (int)a);
+      }
+      printf("%d ", taken);
+      hexout(keys, (size_t)nk);
+      putchar(' ');
+      hexout(out, (size_t)fp_out(out, (int)sizeof out));
+      printf(" %d %d %d\n", fp_escape(), fp_mode(), fp_keys());
+      fflush(stdout);
+   }
+   return 0;
+}
+#endif
