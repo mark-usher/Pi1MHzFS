@@ -1963,7 +1963,7 @@ void tnd_line_typed(tnd_line_t *s, uint8_t key, uint32_t now_us)
 
 void tnd_line_escape(tnd_line_t *s)
 {
-   s->eh = s->en = s->matched = 0u;
+   s->eh = s->en = s->matched = s->skip = 0u;
    s->nl = false;
 }
 
@@ -2076,12 +2076,29 @@ static size_t line_strip(tnd_line_t *s, uint8_t c, uint8_t *dst)
 static size_t line_release(tnd_line_t *s, uint8_t *dst)
 {
    size_t   n = 0u;
-   uint16_t m = s->matched;
+   unsigned m = s->matched, k = s->skip;
 
-   s->matched = 0u;
-   for (uint16_t i = 0u; i < m; i++)
-      n += line_strip(s, s->exp[ring_at(s, i)], dst + n);
+   s->matched = s->skip = 0u;
+   for (unsigned i = 0u; i < m; i++)
+      n += line_strip(s, s->exp[ring_at(s, k + i)], dst + n);
    return n;
+}
+
+/* Can an echo start with c?  At the first key expected, or at the start of a later
+   line: the lines before it may have been read without an echo (by GET or INKEY).
+   They are only forgotten once the later line's echo is complete, so a near match
+   in the output costs nothing; but one key read silently cannot leave every later
+   line's echo unmatched. */
+static bool line_restart(tnd_line_t *s, uint8_t c)
+{
+   for (unsigned k = 0u; k < s->en; k++) {
+      if (s->exp[ring_at(s, k)] == c && (k == 0u || s->exp[ring_at(s, k - 1u)] == 13u)) {
+         s->skip = (uint16_t)k;
+         s->matched = 1u;
+         return true;
+      }
+   }
+   return false;
 }
 
 size_t tnd_line_beeb(tnd_line_t *s, uint8_t c, uint32_t now_us, uint8_t *dst)
@@ -2098,28 +2115,28 @@ size_t tnd_line_beeb(tnd_line_t *s, uint8_t c, uint32_t now_us, uint8_t *dst)
             return 0u;
       }
       if (s->en != 0u) {
-         uint8_t want = s->exp[ring_at(s, s->matched)];
-         if (s->matched < s->en && want == 13u && (c == 13u || c == 10u)) {
-            s->eh = (uint16_t)ring_at(s, (unsigned)s->matched + 1u);   /* the line's echo, all of it */
-            s->en = (uint16_t)((unsigned)s->en - s->matched - 1u);
-            s->matched = 0u;
+         unsigned at = (unsigned)s->skip + s->matched;   /* the next key expected */
+         uint8_t  want = s->exp[ring_at(s, at)];
+         if (at < s->en && want == 13u && (c == 13u || c == 10u)) {
+            s->eh = (uint16_t)ring_at(s, at + 1u);      /* the line's echo, all of it (and any before it) */
+            s->en = (uint16_t)(s->en - at - 1u);
+            s->matched = s->skip = 0u;
             s->col = 0u;                        /* the client's cursor is at the start of a line */
             s->cr = false;
             s->gfx = false;
             s->nl = (c == 13u);
             return 0u;
          }
-         if (s->matched < s->en && want == c) {
+         if (at < s->en && want == c) {
             s->matched++;
             return 0u;
          }
-         if (s->matched != 0u) {                /* it stopped matching: not the echo */
+         if (s->matched != 0u)                  /* it stopped matching: not the echo */
             n = line_release(s, dst);
-            if (s->exp[s->eh] == c && s->code == 0u && !s->disabled) {
-               s->matched = 1u;
-               s->ga_armed = s->ga_armed || n != 0u;
-               return n;
-            }
+         if (s->code == 0u && !s->disabled && line_restart(s, c)) {
+            if (n != 0u)
+               s->ga_armed = true;
+            return n;
          }
       }
    }
@@ -2138,7 +2155,7 @@ size_t tnd_line_tick(tnd_line_t *s, uint32_t now_us, uint8_t *dst)
       return 0u;
    if (s->matched != 0u)
       n = line_release(s, dst);
-   s->eh = s->en = 0u;
+   s->eh = s->en = s->skip = 0u;
    if (n != 0u)
       s->ga_armed = true;
    return n;

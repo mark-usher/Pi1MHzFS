@@ -1230,6 +1230,18 @@ static void test_line_echo(void)
    CHECK(s.en == 0 && nlout == 0, "given up after TND_ECHO_US");
    LCHECK(&s, "You said Y\n\r", "You said Y\r\n", "so the program's text is not taken for an echo");
 
+   /* A line read without an echo (GET took its key) does not block the next one. */
+   lstart(&s, 7);
+   LTYPE(&s, "Y\rAB\r");
+   LCHECK(&s, "x\n\r>AB\n\r>", "x\r\n>>", "the next line's echo is matched past the unechoed one");
+   CHECK(s.en == 0 && s.skip == 0, "and both are forgotten");
+
+   lstart(&s, 7);
+   LTYPE(&s, "Y\rAB\r");
+   LCHECK(&s, "AC", "AC", "a near match of a later line is written");
+   CHECK(s.en == 5 && s.skip == 0 && s.matched == 0, "and the earlier line is still expected");
+   LCHECK(&s, "Y\n\rAB\n\r>", ">", "so its echo is still taken out, then the later one's");
+
    /* Half an echo, then nothing. */
    lstart(&s, 7);
    LTYPE(&s, "PRINT\r");
@@ -1337,7 +1349,7 @@ static void test_line_robustness(void)
          if ((seed & 3u) == 0u)
             tnd_line_escape(&s);
       }
-      CHECK(s.en <= TND_LINE_EXP && s.matched <= s.en, "the echo ring stays consistent");
+      CHECK(s.en <= TND_LINE_EXP && s.skip + s.matched <= s.en, "the echo ring stays consistent");
       lnow += 7u;
    }
    /* The largest release: a full ring matched and then broken. */

@@ -229,6 +229,7 @@ typedef struct {
    uint8_t  exp[TND_LINE_EXP];  /* the keys given to the Beeb whose echo is still to come */
    uint16_t eh, en;             /* ... the oldest, and how many */
    uint16_t matched;            /* bytes of the Beeb's output that matched them so far, held back */
+   uint16_t skip;               /* ... matched from a later line: the keys before it (see line_restart) */
    bool     nl;                 /* a line's echo matched: its new line (CR ... LF) is being dropped */
    bool     ga_armed;           /* something happened since the last end of output */
    uint32_t typed_us, out_us;   /* the last key given, the last byte from the Beeb */
