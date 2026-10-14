@@ -1,8 +1,10 @@
 # Telnet daemon - design record
 
 > **STATUS 2026-10-14, part 2 (branch telnetd-linemode): line mode for nc and scripts,
-> chosen per connection, host-tested and run end to end in Beebium and a Python 6502
-> against the real MOS and BASIC (section 16). Not yet on the hardware.**
+> chosen per connection, and shell mode (a line editor on the Pi) for terminals, with
+> a hot key (Ctrl-\ m) and teletext rendered or as markers. Host-tested and run end
+> to end in Beebium (with and without a second processor) and a Python 6502 against
+> the real MOS and BASIC (section 16). Not yet on the hardware.**
 >
 > **STATUS 2026-10-14: built, host-tested (206,751 translator checks, 179 ROM
 > checks), and run on a BBC Model B with the auto-start ROM build 5 in a flash bank:
@@ -746,7 +748,7 @@ but is a dumb terminal still gets screen mode.
   earlier lines are only forgotten when the later line's echo is complete.
   Expectations are given up once nothing has been typed or printed for
   `TND_ECHO_US` (1 s). The daemon gives the redirect no more keys than
-  `tnd_line_room()` (160), so every key it types can be matched; a paste is paced
+  `tnd_line_room()` (256 since shell mode), so every key it types can be matched; a paste is paced
   by the echo.
 - **End of output:** `tnd_line_ga_due` is true once each time something happened
   and then the Beeb has printed nothing for `TND_GA_US` (300 ms), no key is waiting
@@ -816,3 +818,120 @@ negotiates nothing.
 - The interaction with the ROM's screen scan and the unseen ROM filing system
   output: line mode does not ask for scans, so `*CAT` on the ROM filing system
   shows nothing in line mode.
+
+### Shell mode, the hot key, teletext in line mode (2026-10-14, later)
+
+**STATUS: built, host-tested (802,125 translator checks), 39 transcript checks each
+on Beebium `model-b`, Beebium `model-b-disc-65c02-copro` and the Python 6502. Firmware
+builds warning-free for `rpi`, debug and release. Not yet on the hardware.**
+
+**Shell mode** is line mode for a terminal. `tnd_shell_*` (`telnetd_proto.c`) is a
+readline-like editor on the Pi. It owns its own `tnd_line_t`, which does the output
+filtering and the echo matcher. Keys come from the same `tnd_in_byte`, with
+`edit_keys` set so that Home (`ESC[1~`, `ESC[7~`, `ESC[H`, `ESC O H`) and Delete
+(`ESC[3~`) come through as editing keys; screen mode is unchanged. The editing keys
+are those in the user guide. History is 16 lines with no repeats; a repeated line
+moves to the front. Ctrl-R is deliberately small: it finds the next older line that
+contains what was typed. The edit line is drawn after the Beeb's prompt, one column
+per character, and redrawn whole after each key (cursor back, clear to the end of
+line, the line, cursor back into place). Beeb output that arrives while it is shown
+takes it off first, so the output lands where the Beeb's cursor is. The line comes
+back once the Beeb has been quiet for 30 ms. RETURN draws the line, moves to a new
+line, sends the keys and RETURN, and gives the matcher the characters to expect.
+
+**Who gets a key (the probe).** telnetd cannot see whether the Beeb is in OSWORD 0
+or GET. `serial_redirect.c` is not to be touched, and the MOS shows no difference on
+RS423. What it can see is the echo. So:
+
+- A line being edited owns every key.
+- Otherwise a printable key at a Beeb that has been quiet for 100 ms goes to it at
+  once, as a probe. If the Beeb's next output byte (outside a VDU parameter) is that
+  key, a line editor is reading. The editor takes over: the echo is dropped, a
+  DELETE goes to take the key back out of the Beeb's line (its echo is dropped too),
+  and the key starts the edit line.
+- Any other output, or none within 250 ms, means a program took the key. Keys then go
+  straight to the Beeb, as screen mode would send them, until none has been typed
+  for 500 ms.
+- Keys typed while a probe waits are held (up to 32) and follow its outcome. The
+  usual case is a fast typist: the echo arrives within milliseconds, and they become
+  the rest of the edit line.
+- At a quiet Beeb, editing keys (arrows, Home, End, Ctrl-A/E/K/U/W/R, RETURN) open
+  the editor directly. While the Beeb is busy they go straight to it.
+
+Limits: a program waiting quietly for a cursor key or RETURN loses it to the editor
+(screen mode is the answer). A program that prints the key it read, followed by a
+new line, looks like an echo. Long edit lines redraw badly across the terminal's own
+wrap, because NAWS is refused and the width is not known.
+
+**Ctrl-V and codes from &80.** The stub inserts whatever byte telnetd queues
+(`serial_redirect_write` takes any byte). But the keyboard buffer is not what a
+program reads: the MOS interprets codes from &80 through `*FX221-228`. Measured on
+MOS 1.20, by putting each byte &80-&FF into the buffer with a GET loop running:
+
+- &80-&8F expand as function key strings.
+- &90-&9A give &80-&8A (SHIFT and a function key).
+- &A0-&AA give &90-&9A (CTRL and a function key).
+- &D0-&DA, &E0-&EA and &F0-&FA give themselves.
+- &BB and &CB give 127.
+- Everything else gives nothing.
+
+`tnd_key_for_char` maps a character to the key that gives it. Ctrl-V refuses (with a
+bell) the codes no key gives: &8B-&8F (including double height), &9B-&9F (including
+new background and hold) and &A0-&CF. It also refuses &FF, which the auto-start ROM
+takes as its scan request. The matcher expects the character, not the key: the echo
+of &91 is &81.
+
+**The hot key** is Ctrl-\ (28) as a prefix, in screen and shell mode
+(`tnd_hotkey`):
+
+- Ctrl-\ m switches modes. To screen mode, the terminal is drawn from the model,
+  which follows the Beeb in every mode. To shell mode, a new line.
+- Ctrl-\ t switches rendered and markers.
+- Ctrl-\ Ctrl-\ sends a 28.
+
+F10 is f0 and F11/F12 are taken, so a function key would have cost a Beeb key. The
+same goes for any control key, so it is a prefix, and the shadowed key stays
+available by pressing it twice. With `telnetd_linemode=off` there is no hot key: that
+setting is screen mode exactly as before. `telnetd_linemode=shell` starts terminals
+in shell mode. A late DO ECHO or Ctrl-\ m goes to whichever of the two the session
+last chose.
+
+**Teletext in line and shell mode** (`tnd_line_t.ttx`):
+
+- **Spaces**: raw line mode keeps it (nc gets no escape codes).
+- **Rendered**: the default for shell mode, `telnetd_teletext=rendered`. It runs
+  each MODE 7 cell through the screen translator's own `ttx_store` and `ttx_step`,
+  so the code rules (set-at and set-after, hold, conceal, sextant mosaics, MODE 7's
+  `#`, `_` and pound) are the screen mode ones. SGR changes are sent only when the
+  colours change, and the colours are reset at the end of each line and at the
+  Beeb's 40-column row boundary.
+- **Markers**: each code is a one-column marker (`tnd_marker`), a block in its colour
+  or a reversed letter. Concealed text is shown, and mosaics are sextants.
+
+The shell's edit line always uses markers for codes, since nothing in it can be
+coloured. `TND_LINE_EXP` is now 256 (a whole BASIC line and RETURN), and
+`TND_LINE_GLYPH_MAX` (32) bounds a byte's output. So the daemon's output buffer is
+32 KB, to hold a shell redraw (`TND_SH_CLI_MAX`).
+
+**Transcripts** (`tools/telnetd-emu`, run through a small terminal emulator, typed a
+key every 40 ms of Beeb time):
+
+| Check | Python 6502 | Beebium B | Beebium B + 65C02 |
+|---|---|---|---|
+| line mode set (as before) | 25 / 25 | 25 / 25 | 25 / 25 |
+| shell: `PRINT 2+2`, then Up, Left, Backspace, `*`, RETURN runs `PRINT 2*2`; each line shown once | ok | ok | ok |
+| shell: `10 PRINT "` Ctrl-V 81 `RED` Ctrl-V 82 `GREEN"`; LIST with markers (a red and a green block, columns kept); Ctrl-\ t; LIST and RUN rendered (`ESC[0;31mRED`, code cells spaces) | ok | ok | ok |
+| shell: a GET loop gets Y, N and Q typed as single keys (`GOT 89`, `GOT 78`, `GOT 81`) | ok | ok | ok |
+| shell: Ctrl-C in `10 GOTO 10` | ok | ok | ok |
+| Ctrl-\ m to screen mode (the Beeb's own echo), and back (one echo again) | ok | ok | ok |
+| total | 39 / 39 | 39 / 39 | 39 / 39 |
+
+Typing &81 through Ctrl-V reached BASIC's line editor on a real MOS 1.20 as SHIFT-f1
+(&91), and on the second processor too.
+
+**Still to check on the hardware:** the probe's timings over Wi-Fi. A slow round trip
+only delays the echo, and the probe waits 250 ms of Pi time from when the key was
+queued, not from when the Beeb took it. Also to check: PuTTY's and xterm's real key
+sequences, a terminal narrower than a long line, and the hot key in PuTTY (Ctrl-\
+reaches the server as 28) and in Linux telnet, which uses Ctrl-] for itself, not
+Ctrl-\.
