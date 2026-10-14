@@ -126,6 +126,15 @@
 #define SER_MOS_ESCFLAG 0x00FFu
 #define SER_MOS_RSBUSY  0x024Fu  /* bit 7 set: RS423 output idle (what the idle trip stores: &80) */
 #define SER_IDLE_US      2000u   /* output quiet this long: the idle trip */
+
+/* The escape trip's routine, just below the stub (FRED, which the Pi serves): the MOS's own way
+   of raising ESCAPE (OS 1.2 &E674), which also tells a second processor - the escape flag lives
+   in both machines, and a program on the second processor reads its own:
+      STA &FF / BIT &027A / BPL out / JMP &0403 / out: RTS
+   &027A bit 7 is the MOS's "Tube present"; &0403 is the Tube host code's "escape changed"
+   entry, which reads &FF and passes it across, and ends with RTS. */
+#define SER_ESCR_OFF   12u
+static const uint8_t ser_escr[11] = { 0x85, 0xFF, 0x2C, 0x7A, 0x02, 0x10, 0x03, 0x4C, 0x03, 0x04, 0x60 };
 #define SER_STUB_LEN   0x31u
 
 #define OP_CLC  0x18u
@@ -247,7 +256,12 @@ static void ser_esc_arm(void)
       left asserted (a reset taken inside the trip itself leaves nIRQ low and hangs it). */
    ser_brk_trip = ser_brk_req;               /* the consume that ends this trip sets the exit */
    ser_brk_req = false;
-   ser_trip_arm(SER_MOS_ESCFLAG, SER_ESC_BYTE);
+   if (ser_base >= SER_ESCR_OFF) {           /* the MOS's way, the Tube told too */
+      ser_write(SER_JSR, (uint8_t)(ser_base - SER_ESCR_OFF));
+      ser_write(SER_RX_BYTE, SER_ESC_BYTE);
+   } else {
+      ser_trip_arm(SER_MOS_ESCFLAG, SER_ESC_BYTE);
+   }
 }
 
 static bool ser_arm_next(void)
@@ -625,6 +639,9 @@ void serial_redirect_init(uint8_t instance, uint8_t address)
 
    for (uint8_t i = 0u; i < SER_STUB_LEN; i++)
       Pi1MHz_MemoryWrite((uint32_t)address + i, stub[i]);
+   if (address >= SER_ESCR_OFF)
+      for (unsigned int i = 0u; i < sizeof ser_escr; i++)
+         Pi1MHz_MemoryWrite((uint32_t)address - SER_ESCR_OFF + i, ser_escr[i]);
    for (unsigned int i = 0u; i < sizeof rel; i++)
       Pi1MHz_MemoryWrite((uint32_t)address + rel[i], (uint8_t)(address + stub[rel[i]]));
 
