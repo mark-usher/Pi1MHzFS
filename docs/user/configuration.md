@@ -75,7 +75,8 @@ plus `_addr`:
 | `WiFiSvc_addr` | (none) | The 1MHz-WiFi ROM's service (also needs `wifi_service_enable`) |
 | `fujinet_addr` | (none) | The FujiNet device for fn-rom |
 | `Teletext_addr` | `0x10` | Acorn Teletext Adapter at `&FC10-&FC13` |
-| `Serial_addr` | `0xCC` | The serial redirector's stub at `&FCCC-&FCF8` (helper 19) |
+| `Telnetd_addr` | (none), **off by default** | The telnet daemon (no FRED address): on when `telnetd_port` is set; `Telnetd_addr=-1` turns it off whatever else is set |
+| `Serial_addr` | `0xCC` | The serial redirector (helper 19, and TelnetD) at `&FCB7-&FCFC`: its stub at `&FCCC-&FCFC`, the stub's escape routine at `&FCBF-&FCC9` and the TelnetD ROM's workspace at `&FCB7-&FCBE`. The whole block moves with the base (base-&15 to base+&30). The TelnetD ROM needs it at `0xCC` |
 | `Watchdog_addr` | (none) | Watchdog (use the `watchdog` key below instead) |
 
 **Two bases you should not move:** `Framebuffer_addr` (default `&FCA0`)
@@ -188,12 +189,16 @@ See [The telnet daemon](telnetd.md).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `telnetd_port` | (off) | TCP port the daemon listens on (`23` is telnet). Absent or `0` turns it off. Helper 20 on the Beeb connects it. |
-| `telnetd_login` | `1` | `0` skips the login even when `webdav_user` and `webdav_password` are set. |
+| `telnetd_port` | (off) | TCP port the daemon listens on (`23` is telnet): setting it turns TelnetD on. Absent or `0`, or `Telnetd_addr=-1`, turns it off, and then the auto-start ROM does not touch the Beeb. Helper 20 on the Beeb connects it. |
+| `telnetd_user` | (none) | The telnet login's user name (up to 64 characters). Telnet's own, never the web interface's. |
+| `telnetd_password` | (none) | The telnet login's password (up to 64 characters). It may be empty (`telnetd_password=` on its own): the password is then just RETURN. Without `telnetd_user` and a `telnetd_password` line every connection is refused, unless `telnetd_login=0`. |
+| `telnetd_login` | `1` | `0`: no login at all, the daemon is open to the network. |
 | `telnetd_ansi` | `1` | `0` sends the Beeb's output as it is, with no ANSI translation. |
 | `telnetd_utf8` | `1` | The pound sign as UTF-8; `0` sends Latin-1. |
 | `telnetd_mode` | `7` | The Beeb's screen mode (0-7) until it sends a `MODE`. |
 | `telnetd_copycursor` | `1` | `0` does not mark the copy cursor in the terminal. |
+| `telnetd_tek` | `1` | Draw the Beeb's graphics in xterm's Tektronix window when the terminal says it is xterm; `0`: never. |
+| `telnetd_debug` | `0` | `1` shows TelnetD's diagnostics on the status page (keys waiting, the screen MODE it follows and why it last changed, the TCP state) and the Telnetd TCP row. |
 
 ## Econet (AUN) settings
 
