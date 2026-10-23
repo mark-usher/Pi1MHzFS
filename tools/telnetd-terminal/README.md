@@ -121,6 +121,16 @@ is given on its command line and opens every window at its default size (120 x 3
 its own font); at 12.5 points that holds 32 rows of the BBC fonts. A bigger font
 needs a bigger window, which you can drag to size: TelnetD draws the screen again.
 
+If Windows Terminal closes at once on a BBC Micro profile after an update to the fonts,
+Windows' font cache still holds the old version under the same font name. Clear it
+from an administrator PowerShell, and the profiles work again:
+
+    Stop-Service FontCache -Force
+    Remove-Item "$env:WINDIR\ServiceProfiles\LocalService\AppData\Local\FontCache\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Start-Service FontCache
+
+Signing out and in again also works.
+
 Windows' telnet client is an optional feature. To turn it on, run this once from an
 administrator command prompt:
 

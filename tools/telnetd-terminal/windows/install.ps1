@@ -89,6 +89,12 @@ if ($wtSettings) {
     $others = @($json.schemes | Where-Object { $_.name -ne $scheme.name })
     Copy-Item $wtSettings.FullName ($wtSettings.FullName + '.before-bbc-micro') -Force
     $json.schemes = @($others) + $scheme
+    # Windows Terminal keeps an entry for each fragment profile it has seen, with the name it had then, and that
+    # name wins over the fragment's: an earlier kit's names ("BBC Micro MODE 0/3") stay, and wt -p "BBC Micro"
+    # finds nothing. Our entries go; Windows Terminal makes them again from the fragment.
+    if ($json.profiles -and $json.profiles.list) {
+        $json.profiles.list = @($json.profiles.list | Where-Object { $_.source -ne 'Pi1MHz TelnetD' })
+    }
     $json | ConvertTo-Json -Depth 32 | Set-Content $wtSettings.FullName -Encoding UTF8
     Write-Host 'Colour scheme "BBC Micro" added to Windows Terminal''s settings.'
 }
