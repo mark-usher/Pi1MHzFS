@@ -132,6 +132,11 @@ static uint32_t g_kgen_seen;                  /* the reports already used */
 #define KEYS_HUNG_US   5000000u                  /* keys waiting this long, none taken: "not taking keys" */
 #define SILENT_KEY_US  250000u                   /* a key taken, then no character drawn this long: read the screen */
 #define SILENT_SCAN_US 1000000u                  /* ... at most this often */
+/* A screen read only to check the picture the Pi already has (merged) waits until nobody has typed for this
+   long: the Beeb reads keys only after it, and in MODE 0 it takes over 3 s (each of 2560 characters
+   recognised from the bitmap), so keys typed as a session starts did not show for seconds. */
+#define SCAN_IDLE_US   2000000u
+static uint32_t g_typed_us;                      /* the last key typed, or the screen first drawn */
 static bool     g_lit_next;                      /* the next key is a byte above 127 */
 static uint32_t g_keys_base;                     /* put in less taken when the buffer was last emptied */
 static uint32_t g_taken_seen, g_taken_us;        /* keys taken, and when the count last moved */
@@ -304,9 +309,10 @@ static uint32_t g_scan_keys;                       /* scan keys queued and not y
    value (&FF there is a typed y-diaeresis, not the Pi's own SCAN_KEY). */
 static void k_put(uint8_t k, bool literal)
 {
-   if (literal || k != SCAN_KEY)
+   if (literal || k != SCAN_KEY) {
       g_banner_until = Pi1MHz_now_us;              /* somebody is typing: the start-up is over */
-   else
+      g_typed_us = Pi1MHz_now_us;
+   } else
       g_scan_keys++;
    if (g_ktail - g_khead < KRING_SIZE) {
       g_kring[g_ktail & KRING_MASK] = k;
@@ -1418,6 +1424,7 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
                            || (g_in.win_rows >= (g_out.bbcfont ? 32u : g_out.rows)
                                && g_in.win_cols >= (g_out.bbcfont ? 80u : g_out.cols)))) {   /* made big enough */
          g_connecting = false;
+         g_typed_us = now_us;                   /* a checking read waits for a pause in the typing from here */
          if (g_ansi && g_tek && g_in.ttype_got
              && (strncmp(g_in.ttype, "XTERM", 5) == 0 || strncmp(g_in.ttype, "xterm", 5) == 0))
             o_str("\x1b[>q");                   /* XTVERSION: a real xterm can draw the Beeb's graphics */
@@ -1483,7 +1490,8 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
       g_scan_pending = true;
    }
    if (g_scan_pending && g_ansi && g_stage == S_LIVE && !g_repaint && !g_connecting && !naws_wait && g_pcb != NULL && beeb_attached
-       && serial_redirect_scan_ok() && g_khead == g_ktail) {
+       && serial_redirect_scan_ok() && g_khead == g_ktail
+       && (!g_scan_merge || (now_us - g_typed_us) >= SCAN_IDLE_US)) {
       g_scan_pending = false;
       if (g_scan_merge) {
          g_scan_merge = false;

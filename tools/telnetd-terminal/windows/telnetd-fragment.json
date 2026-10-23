@@ -9,7 +9,7 @@
                 "face": "BBC Micro MOS",
                 "size": 12.5
             },
-            "cursorShape": "filledBox",
+            "cursorShape": "underscore",
             "padding": "8",
             "scrollbarState": "hidden",
             "suppressApplicationTitle": true,
@@ -26,7 +26,7 @@
                 "face": "BBC Micro Teletext",
                 "size": 12.5
             },
-            "cursorShape": "filledBox",
+            "cursorShape": "underscore",
             "padding": "8",
             "scrollbarState": "hidden",
             "suppressApplicationTitle": true,

@@ -28,8 +28,8 @@ Windows Registry Editor Version 5.00
 "BackspaceIsDelete"=dword:00000001
 "LocalEcho"=dword:00000002
 "LocalEdit"=dword:00000002
-"CurType"=dword:00000000
-"BlinkCur"=dword:00000000
+"CurType"=dword:00000001
+"BlinkCur"=dword:00000001
 "BoldAsColour"=dword:00000001
 "WinTitle"="BBC Micro"
 "Colour0"="255,255,255"
@@ -71,8 +71,8 @@ Windows Registry Editor Version 5.00
 "BackspaceIsDelete"=dword:00000001
 "LocalEcho"=dword:00000002
 "LocalEdit"=dword:00000002
-"CurType"=dword:00000000
-"BlinkCur"=dword:00000000
+"CurType"=dword:00000001
+"BlinkCur"=dword:00000001
 "BoldAsColour"=dword:00000001
 "WinTitle"="BBC Micro - MODE 7"
 "Colour0"="255,255,255"
