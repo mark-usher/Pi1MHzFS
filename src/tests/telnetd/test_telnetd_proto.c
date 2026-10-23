@@ -1588,14 +1588,14 @@ static void test_bbcfont(void)
    BBC("\x16\x00", "A");
    CHECK(strchr(out, 'A') != NULL && strchr(out, '\xee') == NULL, "MODE 0: plain characters");
    BBC("\x16\x01", "A");
-   CHECK(strstr(out, "\xee\x82\x82\xee\x82\x83") != NULL, "MODE 1: 'A' is its two halves, U+E082 U+E083");
-   if (!strstr(out, "\xee\x82\x82")) printf("    got [%s]\n", out);
+   CHECK(strstr(out, "\xee\xa6\x82\xee\xa6\x83") != NULL, "MODE 1: 'A' is its two halves, U+E982 U+E983");
+   if (!strstr(out, "\xee\xa6\x82")) printf("    got [%s]\n", out);
    BBC("\x16\x01", "\x1f\x05\x03");
    CHECK(strstr(out, "\x1b[4;11H") != NULL, "MODE 1: TAB(5,3) is the terminal's column 11");
    BBC("\x16\x02", "A");
    CHECK(strstr(out, "\xee\x88\x84\xee\x88\x85\xee\x88\x86\xee\x88\x87") != NULL, "MODE 2: 'A' is its four quarters, U+E204-E207");
    BBC("\x16\x01", "AB\x7f");
-   CHECK(strstr(out, "\x08\x08\xee\x81\x80\xee\x81\x81\x08\x08") != NULL, "MODE 1: DELETE is two cells back, a blank of two halves, back");
+   CHECK(strstr(out, "\x08\x08\xee\xa5\x80\xee\xa5\x81\x08\x08") != NULL, "MODE 1: DELETE is two cells back, a blank of two halves, back");
    BBC("\x16\x07", "A");
    CHECK(strstr(out, "\xee\x8e\x82\xee\x8e\x83") != NULL, "MODE 7: 'A' is the teletext font's two halves, U+E382 U+E383");
    BBC("\x16\x07", "\x8d" "A\r\n\x8d" "A");

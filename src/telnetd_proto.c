@@ -863,11 +863,12 @@ static size_t put_pua(uint8_t *dst, unsigned cp)
    return 3u;
 }
 
-/* The pieces of the BBC Micro MOS font (telnetd_font=bbc): a MOS character c (32-127, 96 the pound) in
-   halves at U+E000 + 2c, in quarters at U+E100 + 4c; a teletext cell g (32-127 the chip's characters by
+/* The pieces of the BBC Micro MOS font (a terminal type with "bbc"): a MOS character c (32-127, 96 the
+   pound) in halves at U+E900 + 2c, in quarters at U+E100 + 4c; a teletext cell g (32-127 the chip's characters by
    their screen codes, 128 + n a contiguous mosaic, 192 + n a separated one, n the six cells) in halves at
-   U+E300 + 2 (256 v + g), v 0 for normal height, 1 the top and 2 the bottom of double height. */
-#define PUA_MOS2  0xE000u
+   U+E300 + 2 (256 v + g), v 0 for normal height, 1 the top and 2 the bottom of double height. Nothing at
+   U+E000-E0FF: terminals draw the Powerline symbols there themselves (Windows Terminal U+E0B0-E0BF). */
+#define PUA_MOS2  0xE900u
 #define PUA_MOS4  0xE100u
 #define PUA_TTX   0xE300u
 
