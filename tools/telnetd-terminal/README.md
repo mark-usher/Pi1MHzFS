@@ -54,16 +54,17 @@ for MODE 7, and 8 x 16, 16 x 16 and 32 x 16 for the others. The Linux console
 supports only the Basic Multilingual Plane, so the console fonts have no sextants.
 On the console a mosaic is shown as the nearest block character instead.
 
-## One window for every MODE: `telnetd_font=bbc` (recommended)
+## One window for every MODE (recommended)
 
-A program changes MODE as it runs, and a window can't change its font with it. Put
-this line in the Pi's `Pi1MHz.cfg` and restart the Pi:
+A program changes MODE as it runs, and a window can't change its font with it. So
+the "BBC Micro MODE 0/3" profiles tell TelnetD that the window has the "BBC Micro MOS"
+font: they send the terminal type `xterm-bbc` (any terminal type with `bbc` in it
+does). TelnetD then draws every MODE in its own shape in that one 80 x 32 window.
+Every other window gets plain characters, so Windows' telnet client, or a terminal
+in its own font, works as before. To turn this off on the Pi, put
+`telnetd_font=plain` in its `Pi1MHz.cfg`.
 
-    telnetd_font=bbc
-
-TelnetD then draws every MODE in its own shape in one 80 x 32 window, using the
-"BBC Micro MOS" font. The font holds each MODE's characters as pieces in Unicode's
-private-use area:
+The font holds each MODE's characters as pieces in Unicode's private-use area:
 - MODE 0 and 3: a character is one cell;
 - MODE 1, 4 and 6: two cells, the left and right halves of the character;
 - MODE 2 and 5: four cells, its quarters;
@@ -71,14 +72,14 @@ private-use area:
   mosaics, and separate top and bottom pieces for double height. So double height
   isn't double width, as it is with the terminal's own double-height lines.
 
-Use the "BBC Micro MODE 0/3" profile, the "BBC Micro MODE 0-3" PuTTY session or the
-MODE 0 `beeb-telnet` (`-m 0`): all of them use that font. The window must be at least
-80 x 32; TelnetD says so when you connect to a smaller one. MODE 7 uses the top 25
-rows, with characters about a tenth wider than on the Beeb.
+Use the "BBC Micro MODE 0/3" Windows Terminal profile with WSL's telnet, the
+"BBC Micro MODE 0-3" PuTTY session or `beeb-telnet -m 0` in a desktop terminal set to
+that font. Windows' own telnet client always says `ANSI`, so it gets plain characters.
+The window must be at least 80 x 32; TelnetD says so when you connect to a smaller
+one. MODE 7 uses the top 25 rows, with characters about a tenth wider than on the Beeb.
 
-Only a terminal with this font installed can show the pieces: in any other font they
-come out as empty boxes, and text copied out of the window is the pieces' codes, not
-letters. Leave `telnetd_font` out to have plain characters again.
+Only send `xterm-bbc` from a window in that font: in any other font the pieces come
+out as empty boxes. Text copied out of the window is the pieces' codes, not letters.
 
 ## Windows
 

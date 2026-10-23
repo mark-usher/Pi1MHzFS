@@ -277,9 +277,10 @@ mode you work in; the Beeb starts in MODE 7, so that is the default.
   `beeb-telnet [-m mode] [host]`. On the Linux console it loads that mode's console
   font and the BBC's colours for the session.
 
-A window keeps one font, but a program changes MODE as it runs. With
-`telnetd_font=bbc` (see "Settings") the daemon draws every MODE in its own shape in
-one 80 x 32 window in the "BBC Micro MOS" font, a character as one, two or four of the
+A window keeps one font, but a program changes MODE as it runs. When the terminal
+says it has the "BBC Micro MOS" font (its terminal type has `bbc` in it, as the kit's
+"BBC Micro MODE 0/3" profiles send `xterm-bbc`), the daemon draws every MODE in its own
+shape in one 80 x 32 window, a character as one, two or four of the
 font's pieces, and teletext double height without the double width. That is the way
 to watch a program that changes MODE, such as the demo.
 
@@ -642,7 +643,7 @@ nowhere else, and keep telnet to a network you trust.
 | `telnetd_raw_port` | (none) | A second port for teletype mode with no telnet (PuTTY's Raw, `nc`): bytes as they are, both ways. |
 | `telnetd_ansi` | `1` | `0` sends the Beeb's output exactly as it is, with no ANSI. For a program that does its own VDU handling. |
 | `telnetd_utf8` | `1` | The pound sign as UTF-8; `0` sends it as Latin-1. |
-| `telnetd_font` | (none) | `bbc`: the terminal has the BBC Micro MOS font from `tools/telnetd-terminal` and is 80 x 32. Every MODE is drawn in its own shape in that one window (a character as 1, 2 or 4 of the font's private-use pieces), and teletext double height as top and bottom pieces instead of the terminal's double-height lines. In any other font the pieces show as boxes. |
+| `telnetd_font` | (none) | A terminal whose type has `bbc` in it (the kit's `xterm-bbc`) has the BBC Micro MOS font from `tools/telnetd-terminal` and is 80 x 32: every MODE is drawn in its own shape in that one window (a character as 1, 2 or 4 of the font's private-use pieces), and teletext double height as top and bottom pieces instead of the terminal's double-height lines. Any other terminal gets plain characters. `plain`: every terminal does. |
 | `telnetd_palette` | `1` | Sets the terminal's colours to the BBC's when a session starts (OSC 4, 10, 11 and 12), whatever colour scheme the terminal has: the eight colours at full strength, and black the same as the background, so cells the Beeb clears don't show. `0` leaves the terminal's colours alone. The terminal keeps them after the session; `tput reset` (Linux) or a new window puts yours back. |
 | `telnetd_separated` | `1` | MODE 7's separated graphics as Unicode 16's separated sextants; `0` sends them as contiguous ones, for a terminal font that doesn't have them. |
 | `telnetd_mode` | `7` | The Beeb's screen mode (0-7) until it sends a `MODE`. Its size cannot be read, and the daemon needs it to follow the text. |

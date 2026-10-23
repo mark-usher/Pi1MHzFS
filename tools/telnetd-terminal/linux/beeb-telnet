@@ -42,5 +42,5 @@ else
     if [ -t 1 ]; then
         echo "For MODE $MODE choose the font \"$NAME\" and a $COLS x $ROWS window in this terminal's settings."
     fi
-    telnet "$HOST"
+    case $MODE in 0|3) TERM=xterm-bbc telnet "$HOST" ;; *) telnet "$HOST" ;; esac
 fi

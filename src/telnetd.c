@@ -35,10 +35,11 @@
      telnetd_utf8=1       the pound sign as UTF-8; 0: Latin-1
      telnetd_palette=1    set the terminal's colours to the BBC's at connect (OSC 4/10/11/12);
                           0: leave the terminal's own colour scheme
-     telnetd_font=        bbc: the terminal has the BBC Micro MOS font (tools/telnetd-terminal), 80 x 32:
-                          every MODE is drawn in its own shape in that one window, a character
-                          as 1, 2 or 4 of the font's private-use pieces, teletext double height
-                          as top and bottom pieces; anything else: plain characters
+     telnetd_font=        a terminal whose type has "bbc" in it (the kit's xterm-bbc) has the BBC
+                          Micro MOS font (tools/telnetd-terminal), 80 x 32: every MODE is drawn in
+                          its own shape in that one window, a character as 1, 2 or 4 of the font's
+                          private-use pieces, teletext double height as top and bottom pieces;
+                          any other terminal gets plain characters.  plain: every terminal does
      telnetd_separated=1  MODE 7's separated graphics as Unicode 16's separated sextants;
                           0: as contiguous ones (for a terminal font without them)
      telnetd_login=1      0: no login at all, open to the network
@@ -99,6 +100,7 @@ static uint16_t        g_raw_port;
 static bool            g_sess_rawport;         /* this session came on the raw port: no telnet at all */
 static bool            g_tek = true;          /* telnetd_tek: graphics to an xterm's Tek window */
 static bool            g_palette = true;      /* telnetd_palette: the terminal's colours set to the BBC's */
+static bool            g_font = true;         /* telnetd_font: the BBC font's pieces to a terminal whose type says "bbc" */
 /* The BBC's eight colours, normal and bright alike, for the terminal's palette (OSC 4) and its own text,
    background and cursor (OSC 10, 11, 12): the terminal's black is then the Beeb's, so cells the Beeb
    clears match the background, whatever colour scheme the terminal's profile has.  Terminals that do not
@@ -158,6 +160,15 @@ static uint32_t  g_start_us;
 static uint8_t  g_win_gen;                      /* the last size acted on (tnd_in_t's win_gen) */
 static uint8_t  g_mode_gen;                     /* the client's last line or character mode acted on (tnd_in_t's mode_gen) */
 static bool     g_win_first;                    /* the first size has been acted on */
+
+/* The terminal type has "bbc" in it, in any case: the terminal has the BBC Micro MOS font. */
+static bool says_bbc(const char *t)
+{
+   for (; t[0] != '\0' && t[1] != '\0' && t[2] != '\0'; t++)
+      if ((t[0] | 0x20) == 'b' && (t[1] | 0x20) == 'b' && (t[2] | 0x20) == 'c')
+         return true;
+   return false;
+}
 
 /* A new session (once logged in) is "connecting" for a moment: under the boot banners the line
    "Pi1MHz telnet - connecting" gets a dot every CONNECT_DOT_US, for at least CONNECT_MIN_US and
@@ -1358,6 +1369,9 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
       bool ready = (now_us - g_conn_us) >= CONNECT_MIN_US && !naws_wait;
       if (ready && !g_warned) {
          g_warned = true;
+         /* The BBC font's pieces only to a terminal that says it has the font: its terminal type has "bbc"
+            in it (the kit's profiles send xterm-bbc). Any other terminal gets plain characters. */
+         g_out.bbcfont = g_font && g_ansi && g_in.ttype_got && says_bbc(g_in.ttype);
          o_str("\r\n");
          /* With the BBC font every MODE fills 80 x 32 (MODE 7 25 rows of it), and the Beeb changes MODE
             under a session: that is the size it needs. */
@@ -1577,8 +1591,9 @@ void telnetd_init(void)
    tnd_out_reset(&g_out, g_utf8);
    g_out.sep_glyphs = cfg_flag("telnetd_separated", true);
    {
-      const char *f = config_get("telnetd_font");
-      g_out.bbcfont = f != NULL && (f[0] == 'b' || f[0] == 'B');   /* telnetd_font=bbc */
+      const char *f = config_get("telnetd_font");          /* telnetd_font=plain: never the BBC font's pieces */
+      g_font = !(f != NULL && (f[0] == 'p' || f[0] == 'P'));
+      g_out.bbcfont = false;                                /* chosen for each session when it connects */
    }
    {
       const char *m = config_get("telnetd_mode");

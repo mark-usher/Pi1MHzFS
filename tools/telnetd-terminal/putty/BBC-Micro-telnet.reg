@@ -56,6 +56,7 @@ Windows Registry Editor Version 5.00
 "PortNumber"=dword:00000017
 "TermWidth"=dword:00000050
 "TermHeight"=dword:00000020
+"TerminalType"="xterm-bbc"
 "Font"="BBC Micro MOS"
 "FontHeight"=dword:0000000c
 "FontIsBold"=dword:00000000

@@ -62,7 +62,7 @@ Remove-Item $oldDirs -Recurse -ErrorAction SilentlyContinue
 $wsl = $false
 try { & wsl.exe -e sh -c 'command -v telnet' *> $null; $wsl = ($LASTEXITCODE -eq 0) } catch { }
 $frag = Get-Content (Join-Path $here 'telnetd-fragment.json') -Raw
-if (-not $wsl) { $frag = $frag.Replace('wsl.exe -e telnet', 'telnet.exe') }
+if (-not $wsl) { $frag = $frag.Replace('wsl.exe -e env TERM=xterm-bbc telnet', 'telnet.exe').Replace('wsl.exe -e telnet', 'telnet.exe') }
 $frag = $frag.Replace('telnet Pi1MHz', 'telnet ' + $TelnetHost).Replace('telnet.exe Pi1MHz', 'telnet.exe ' + $TelnetHost)
 New-Item -ItemType Directory -Force $fragDir | Out-Null
 Set-Content (Join-Path $fragDir 'telnetd.json') $frag -NoNewline
