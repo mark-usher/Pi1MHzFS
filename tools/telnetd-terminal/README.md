@@ -18,7 +18,7 @@ have on a 4:3 screen:
 
 | Font | File | For | Window | Cell (w:h) |
 |---|---|---|---|---|
-| BBC Micro Teletext | `BBCMicroTeletext.ttf` | MODE 7 | 40 x 25 | 5:6 |
+| BBC Micro Teletext | `BBCMicroTeletext.ttf` | MODE 7 | 40 x 25 | 9:10 |
 | BBC Micro MOS | `BBCMicroMOS.ttf` | MODE 0 and 3 | 80 x 32 | 1:2 |
 | BBC Micro MOS 40 | `BBCMicroMOS40.ttf` | MODE 1, 4 and 6 | 40 x 32 | 1:1 |
 | BBC Micro MOS 20 | `BBCMicroMOS20.ttf` | MODE 2 and 5 | 20 x 32 | 2:1 |
@@ -31,16 +31,23 @@ Micro's MOS 1.20 ROM, which is out of copyright. They include ASCII, the pound
 sign, and the characters TelnetD sends for MODE 7's special ones: `← → ↑ ½ ¼ ¾ ‖ ― ÷`
 and the solid block.
 
-The teletext font is our own drawing in the style of the teletext chip (SAA5050).
-Each character is drawn as a 5 x 9 dot matrix. The chip's "character rounding" then
-smooths it to 12 x 20 pixels by adding a half dot wherever two dots meet only at a
-corner. As on the chip, it has `£ ← ½ → ↑ # ― ¼ ‖ ¾ ÷` and the block in place of
-some ASCII characters.
+The teletext font shows MODE 7 as a real BBC Micro's teletext chip (SAA5050) draws
+it. Each character's 5 x 9 dot matrix was measured from a real Beeb's screen (an HDMI
+capture). The chip's "character rounding" then smooths it to 12 x 20 pixels by
+adding a half dot wherever two dots meet only at a corner; rounding the measured
+dots this way gives back exactly the picture the Beeb drew. As on the chip, it has
+`£ ← ½ → ↑ # ― ¼ ‖ ¾ ÷` and the block in place of some ASCII characters. The cell
+shapes in the table were measured the same way.
 
-Every TrueType font also has Unicode's 60 sextant characters (U+1FB00-1FB3B) and the
-full and half blocks, filling the whole cell. TelnetD uses these to draw MODE 7's
-mosaic graphics, so in Windows Terminal, PuTTY or a desktop terminal the graphics
-join up as on the Beeb.
+Every TrueType font also has the mosaic graphics TelnetD uses for MODE 7:
+- Unicode's 60 sextant characters (U+1FB00-1FB3B) and the full and half blocks, for
+  contiguous graphics. They fill the whole cell, so graphics join up as on the Beeb.
+- Unicode 16's 63 separated sextants (U+1CE51-1CE8F), for separated graphics.
+
+Both kinds have the chip's own proportions: the three rows of blocks are 3, 4 and 3
+lines of the 10 in a character, not equal thirds. Many terminal fonts don't have the
+separated sextants yet. With one of those, set `telnetd_separated=0` on the Pi, and
+separated graphics are sent as contiguous ones.
 
 Each font also comes as a PSF2 console font for the Linux console (`*.psf`): 12 x 20
 for MODE 7, and 8 x 16, 16 x 16 and 32 x 16 for the others. The Linux console

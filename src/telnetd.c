@@ -33,6 +33,8 @@
      telnetd_password=    empty: the password is then just RETURN); up to 64 characters each
      telnetd_ansi=1       0: the Beeb's bytes as they are, no ANSI
      telnetd_utf8=1       the pound sign as UTF-8; 0: Latin-1
+     telnetd_separated=1  MODE 7's separated graphics as Unicode 16's separated sextants;
+                          0: as contiguous ones (for a terminal font without them)
      telnetd_login=1      0: no login at all, open to the network
      telnetd_mode=7       the Beeb's screen mode (0-7) until it sends a MODE: its size
                           cannot be read, and the daemon needs it to follow the text
@@ -1545,6 +1547,7 @@ void telnetd_init(void)
    g_tek = cfg_flag("telnetd_tek", true);
    g_debug = cfg_flag("telnetd_debug", false);
    tnd_out_reset(&g_out, g_utf8);
+   g_out.sep_glyphs = cfg_flag("telnetd_separated", true);
    {
       const char *m = config_get("telnetd_mode");
       long mode = (m != NULL && m[0] != '\0') ? strtol(m, NULL, 10) : 7;

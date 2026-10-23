@@ -152,6 +152,7 @@ typedef struct {
    bool    disabled;            /* VDU 21 seen: everything is ignored until VDU 6 */
    bool    coloured;            /* a colour was set: reset it at the end of the line */
    bool    utf8;                /* the pound sign as UTF-8 (else Latin-1) */
+   bool    sep_glyphs;          /* MODE 7's separated mosaics as separated sextants (U+1CE51-); else as contiguous */
 
    /* a model of the Beeb's text screen: see telnetd_proto.c */
    bool     sync;               /* the cursor position is known (a CLS, MODE, TAB ... was seen) */

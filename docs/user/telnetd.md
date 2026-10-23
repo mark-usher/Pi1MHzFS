@@ -174,6 +174,8 @@ power-on: a second copy in another bank answers the same reset call.
 | arrow keys | the cursor keys (the MOS's copy-cursor editing works) |
 | End | COPY (copies the character under the copy cursor) |
 | F1 to F9, F10 | f1 to f9, f0 |
+| SHIFT, CTRL or both with F1-F10, the arrow keys or End | the same keys with SHIFT, CTRL or both, as the Beeb's keyboard gives them (what they do is up to `*FX4` and `*FX225`-`228`, as on the Beeb) |
+| the pound sign from Windows' own telnet client | the Beeb's pound: Windows telnet types in the console's code page (850), which the daemon reads as such |
 | F12 | BREAK: a soft reset, the same jump as `CALL !-4`, so it works whatever is running. The terminal is cleared and the cursor put where the Beeb reports it; the session comes back when something hooks the daemon in again (HELPERS or the auto-start ROM). Boot banners printed before the hook are not shown. |
 | SHIFT-F12 | SHIFT-BREAK: a BREAK, and the Beeb is told SHIFT is held while it starts, so the filing system boots (`!BOOT`, as `*OPT 4` says). Needs the auto-start ROM. A boot that waits for ever (the DFS with no drive) can only be ended by the BREAK key or the power: see "Things to know". |
 | CTRL-F12 | CTRL-BREAK, as near as software can: a BREAK the MOS takes for a power-on (the MOS reads CTRL from the keyboard itself). The language and the BREAK intercept go back to their defaults as after CTRL-BREAK, but memory from &0400 is cleared too, and OSBYTE 253 says 1 (power-on), not 2. CTRL-SHIFT-F12 is the same. |
@@ -215,9 +217,10 @@ changes the cells after it (or, for some, from its own cell). So you see:
 
 - **the colours**: alphanumeric and graphics colours, new background and black
   background, flash (as the terminal's blink) and conceal;
-- **the graphics**: each mosaic character as its block of six cells, using
-  Unicode's "sextant" characters, contiguous and separated alike, with hold
-  graphics;
+- **the graphics**: each mosaic character as its block of six cells, with hold
+  graphics. Contiguous graphics use Unicode's "sextant" characters, and separated
+  graphics Unicode 16's separated sextants (`telnetd_separated=0` sends them as
+  contiguous ones, for a terminal font that doesn't have them);
 - **the chip's own characters**: where the BBC has `£ ← ½ → ↑ # ― ¼ ‖ ¾ ÷` and a
   solid block instead of some ASCII ones, you see those;
 - **double height**: a row with a double height code is drawn as a double height
@@ -228,7 +231,8 @@ changes the cells after it (or, for some, from its own cell). So you see:
 A control code typed or printed in front of text that is already there changes how
 that text looks, just as on the Beeb. `COLOUR` does nothing in MODE 7, as on the
 Beeb. The sextants need a font with Unicode's "Symbols for Legacy Computing"
-(Cascadia Code, Windows Terminal's font, has them); a terminal that is not using UTF-8
+(Cascadia Code, Windows Terminal's font, has them), and the separated ones a font
+with Unicode 16's (the BBC Micro fonts in `tools/telnetd-terminal` have both); a terminal that is not using UTF-8
 (`telnetd_utf8=0`) gets the Latin-1 or nearest ASCII character instead, and `#`
 for a mosaic.
 
@@ -632,6 +636,7 @@ nowhere else, and keep telnet to a network you trust.
 | `telnetd_raw_port` | (none) | A second port for teletype mode with no telnet (PuTTY's Raw, `nc`): bytes as they are, both ways. |
 | `telnetd_ansi` | `1` | `0` sends the Beeb's output exactly as it is, with no ANSI. For a program that does its own VDU handling. |
 | `telnetd_utf8` | `1` | The pound sign as UTF-8; `0` sends it as Latin-1. |
+| `telnetd_separated` | `1` | MODE 7's separated graphics as Unicode 16's separated sextants; `0` sends them as contiguous ones, for a terminal font that doesn't have them. |
 | `telnetd_mode` | `7` | The Beeb's screen mode (0-7) until it sends a `MODE`. Its size cannot be read, and the daemon needs it to follow the text. |
 | `telnetd_copycursor` | `1` | `0` does not mark the copy cursor in the terminal. |
 | `telnetd_tek` | `1` | Draw the Beeb's graphics in xterm's Tektronix window when the terminal says it is xterm; `0`: never. |

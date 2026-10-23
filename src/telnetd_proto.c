@@ -749,6 +749,7 @@ void tnd_out_reset(tnd_out_t *s, bool utf8)
 {
    memset(s, 0, sizeof *s);
    s->utf8 = utf8;
+   s->sep_glyphs = true;
    tnd_out_assume_mode(s, 7u);
    s->origin_ok = true;
 }
@@ -893,12 +894,14 @@ static size_t put_glyph(const tnd_out_t *s, uint8_t *dst, uint8_t ch)
 
 typedef struct {
    uint8_t fg, bg, held;
-   bool    gfx, sep, hold, flash, conceal, dh;
+   bool    gfx, sep, hold, flash, conceal, dh, held_sep;
+   bool    sep_ok;                              /* separated mosaics as Unicode 16's separated sextants */
 } ttx_t;
 
-static void ttx_init(ttx_t *t)
+static void ttx_init(ttx_t *t, const tnd_out_t *s)
 {
    memset(t, 0, sizeof *t);
+   t->sep_ok = s->sep_glyphs;
    t->fg = 7u;
    t->held = ' ';
 }
@@ -916,10 +919,13 @@ static uint8_t ttx_store(uint8_t c)
    }
 }
 
-static uint32_t ttx_mosaic(uint8_t b)
+/* A mosaic as a Unicode sextant: contiguous, the block U+1FB00 with the half and full blocks Unicode already
+   had; separated (after &9A), Unicode 16's separated sextants, U+1CE51-U+1CE8F in the same cell order. */
+static uint32_t ttx_mosaic(uint8_t b, bool sep)
 {
    unsigned v = (b & 0x1Fu) | ((b & 0x40u) >> 1);   /* bits 0-5: the six cells, top left first */
    if (v == 0u)  return ' ';
+   if (sep)      return 0x1CE50u + v;
    if (v == 63u) return 0x2588u;                /* full block */
    if (v == 21u) return 0x258Cu;                /* left half */
    if (v == 42u) return 0x2590u;                /* right half */
@@ -960,7 +966,7 @@ static void ttx_step(ttx_t *t, uint8_t b, uint32_t *cp, uint8_t *fg, uint8_t *bg
       case 0x9Eu: t->hold = true; break;
       default: break;
       }
-      *cp = (t->hold && t->gfx) ? ttx_mosaic(t->held) : ' ';
+      *cp = (t->hold && t->gfx) ? ttx_mosaic(t->held, t->held_sep && t->sep_ok) : ' ';
       *fg = t->fg; *bg = t->bg; *flash = t->flash;
       if (b >= 0x81u && b <= 0x87u) {           /* set after: from the next cell */
          t->fg = (uint8_t)(b & 7u);
@@ -983,8 +989,9 @@ static void ttx_step(ttx_t *t, uint8_t b, uint32_t *cp, uint8_t *fg, uint8_t *bg
       return;
    }
    if (t->gfx && (b & 0x20u) != 0u) {
-      *cp = ttx_mosaic(b);
+      *cp = ttx_mosaic(b, t->sep && t->sep_ok);
       t->held = b;
+      t->held_sep = t->sep;
    } else {
       *cp = ttx_alpha(b);                       /* in graphics, &40-&5F blast through as capitals */
    }
@@ -997,7 +1004,7 @@ static void ttx_step(ttx_t *t, uint8_t b, uint32_t *cp, uint8_t *fg, uint8_t *bg
 static void ttx_state(const tnd_out_t *s, unsigned y, unsigned x, ttx_t *t)
 {
    uint32_t cp; uint8_t fg, bg; bool fl;
-   ttx_init(t);
+   ttx_init(t, s);
    for (unsigned i = 0u; i < x; i++)
       ttx_step(t, s->ch[y][i], &cp, &fg, &bg, &fl);
 }
@@ -1099,7 +1106,7 @@ static int ttx_row_end(const tnd_out_t *s, unsigned y)
 {
    ttx_t t; uint32_t cp; uint8_t fg, bg; bool fl;
    int   end = -1;
-   ttx_init(&t);
+   ttx_init(&t, s);
    for (unsigned x = 0u; x < s->cols; x++) {
       ttx_step(&t, s->ch[y][x], &cp, &fg, &bg, &fl);
       if (cp != ' ' || bg != 0u)
@@ -1112,7 +1119,7 @@ static int ttx_row_end(const tnd_out_t *s, unsigned y)
 static bool ttx_row_dh(const tnd_out_t *s, unsigned y)
 {
    ttx_t t; uint32_t cp; uint8_t fg, bg; bool fl;
-   ttx_init(&t);
+   ttx_init(&t, s);
    for (unsigned x = 0u; x < s->cols; x++) {
       ttx_step(&t, s->ch[y][x], &cp, &fg, &bg, &fl);
       if (t.dh)

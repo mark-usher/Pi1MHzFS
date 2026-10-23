@@ -1148,6 +1148,18 @@ static void test_output_teletext_chip(void)
    CHECK(strstr(out, "\xf0\x9f\xac\x80") != NULL, "'!' (the top left cell) is the first sextant, U+1FB00"); if (!strstr(out, "\xf0\x9f\xac\x80")) printf("    got [%s]\n", out);
    TTX("\x97" "A");
    CHECK(out[strlen(out) - 1] == 'A', "capitals blast through in graphics");
+   TTX("\x97\x9a!\xff");
+   CHECK(strstr(out, "\xf0\x9c\xb9\x91" "\xf0\x9c\xba\x8f") != NULL,
+         "separated graphics: '!' is U+1CE51, &FF U+1CE8F (Unicode 16's separated sextants)");
+   if (!strstr(out, "\xf0\x9c\xb9\x91")) printf("    got [%s]\n", out);
+   TTX("\x97\x9a!\x99!");
+   CHECK(strstr(out, "\xf0\x9c\xb9\x91") != NULL && strstr(out, "\xf0\x9f\xac\x80") != NULL,
+         "contiguous again after &99");
+   tnd_out_reset(&s, true);
+   s.sep_glyphs = false;
+   feed_out(&s, "\x16\x07", 2, out, sizeof out);
+   feed_out(&s, "\x97\x9a!", 3, out, sizeof out);
+   CHECK(strstr(out, "\xf0\x9f\xac\x80") != NULL, "telnetd_separated=0: separated graphics as contiguous sextants");
 
    TTX("`#_{}~[]^\\|");
    CHECK(strstr(out, "\xc2\xa3#\xe2\x80\x95\xc2\xbc\xc2\xbe\xc3\xb7\xe2\x86\x90\xe2\x86\x92\xe2\x86\x91\xc2\xbd\xe2\x80\x96") != NULL,
