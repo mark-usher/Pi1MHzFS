@@ -237,7 +237,21 @@ static void test_pound_and_high_bytes(void)
    in_reset();
    FEED(&s, "x\xe9y");
    CHECK(nkeys == 4 && keys[1] == TND_KEY_LIT && keys[2] == 0xE9, "lit_ok: a Latin-1 client's byte &E9 too"); if (nkeys != 4) dump();
+   /* Windows' telnet (terminal type ANSI) types in code page 850: the pound sign is &9C, e-acute &82 */
+   tnd_in_reset(&s); s.lit_ok = true; strcpy(s.ttype, "ANSI"); s.ttype_got = true; in_reset();
+   FEED(&s, "a\x9c" "b");
+   CHECK(KEYS("a`b"), "Windows telnet: &9C is the pound sign, the Beeb's 96"); if (!KEYS("a`b")) dump();
    in_reset();
+   FEED(&s, "\x82");
+   CHECK(nkeys == 2 && keys[0] == TND_KEY_LIT && keys[1] == 0xE9, "Windows telnet: &82 is e-acute, &E9"); if (nkeys != 2) dump();
+   in_reset();
+   FEED(&s, "\xc6" "z");                        /* a-tilde: a UTF-8 lead byte with nothing after it */
+   CHECK(nkeys == 3 && keys[0] == TND_KEY_LIT && keys[1] == 0xE3 && keys[2] == 'z', "Windows telnet: &C6 is a-tilde, &E3");
+   if (nkeys != 3) dump();
+   in_reset();
+   FEED(&s, "\xc2\xa3");
+   CHECK(nkeys == 1 && keys[0] == 96, "Windows telnet in a UTF-8 console (chcp 65001): UTF-8 still");
+   tnd_in_reset(&s); s.lit_ok = true; in_reset();
    FEED(&s, "\xe2\x86\x91");
    CHECK(nkeys == 0, "not MODE 7: an up arrow is no Beeb byte");
    s.tele = true; in_reset();
@@ -270,7 +284,7 @@ static void test_cursor_and_function_keys(void)
 
    in_reset();
    FEED(&s, "\x1b[1;5A");
-   CHECK(nkeys == 1 && keys[0] == 143, "modifier parameters are ignored: Ctrl-Up is Up");
+   CHECK(nkeys == 1 && keys[0] == 0xAF, "Ctrl-Up is the keyboard's CTRL-up, &AF");
 
    in_reset();
    FEED(&s, "\x1b[3~");
@@ -287,6 +301,23 @@ static void test_cursor_and_function_keys(void)
    FEED(&s, "\x1bOP\x1bOQ\x1bOR\x1bOS");
    CHECK(nkeys == 4 && keys[0] == 0x81 && keys[1] == 0x82 && keys[2] == 0x83 && keys[3] == 0x84,
          "F1-F4 are f1-f4");
+
+   /* SHIFT and CTRL: the keyboard scan's codes, &10 and &20 above the key's */
+   in_reset();
+   FEED(&s, "\x1b[1;2P\x1b[1;5Q\x1b[1;6S\x1b[15;2~\x1b[21;5~\x1b[20;6~\x1b[1;3P");
+   CHECK(nkeys == 7 && keys[0] == 0x91 && keys[1] == 0xA2 && keys[2] == 0xB4 && keys[3] == 0x95 && keys[4] == 0xA0
+         && keys[5] == 0xB9 && keys[6] == 0x81,
+         "SHIFT-F1 &91, CTRL-F2 &A2, CTRL-SHIFT-F4 &B4, SHIFT-F5 &95, CTRL-F10 &A0, CTRL-SHIFT-F9 &B9, Alt-F1 f1");
+   if (nkeys != 7) dump();
+   in_reset();
+   FEED(&s, "\x1b[1;2A\x1b[1;5D\x1b[1;6C\x1b[1;2F\x1b[4;5~\x1b[1;3B");
+   CHECK(nkeys == 6 && keys[0] == 0x9F && keys[1] == 0xAC && keys[2] == 0xBD && keys[3] == 0x9B && keys[4] == 0xAB
+         && keys[5] == 142, "SHIFT-up &9F, CTRL-left &AC, CTRL-SHIFT-right &BD, SHIFT-End (COPY) &9B, CTRL-End &AB, Alt-down down");
+   if (nkeys != 6) dump();
+   in_reset();
+   FEED(&s, "\x1b[3;2~\x1b[6;2~");
+   CHECK(nkeys == 2 && keys[0] == 127 && keys[1] == TND_KEY_SHIFT, "SHIFT-Delete is DELETE, SHIFT-Page Down still SHIFT");
+   if (nkeys != 2) dump();
 
    in_reset();
    FEED(&s, "\x1b[15~\x1b[17~\x1b[18~\x1b[19~\x1b[20~\x1b[21~");

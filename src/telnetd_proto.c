@@ -14,10 +14,12 @@
      End                      -> 139   (COPY)     Delete -> 127
      F1-F9, F10               -> 129-137, 128 (f1-f9, f0; the MOS expands *KEY
                                 definitions, as for the real keys)
+     ... with SHIFT, CTRL     -> &10, &20 more (as the keyboard scan stores them;
+                                the cursor keys and COPY too)
      a lone ESC, Ctrl-C       -> TND_KEY_ESCAPE (the Beeb's ESCAPE condition; a
                                 lone ESC is only that after TND_ESC_US with
                                 nothing behind it)
-     the pound sign           -> 96    (UTF-8 C2 A3, or Latin-1 A3)
+     the pound sign           -> 96    (UTF-8 C2 A3, Latin-1 A3, or Windows telnet's &9C)
      other bytes 0x80 and up  -> dropped
   Telnet negotiation is answered once per option, so a peer cannot start a loop:
   WILL ECHO/SGA and DO ECHO/SGA are ours; anything else is refused.  DONT ECHO
@@ -113,6 +115,26 @@ static size_t char_key(const tnd_in_t *s, uint32_t cp, uint8_t *keys)
    return 0u;
 }
 
+/* Windows' own telnet client (terminal type "ANSI") types in the console's code page, not Latin-1: the pound
+   sign is &9C, which as Latin-1 is a C1 control and went to the Beeb as a teletext or function key code.  Its
+   bytes above 127 are read as code page 850 (437, the US one, agrees for the pound sign and the accented
+   letters); a UTF-8 console (chcp 65001) sends UTF-8, which is read as such before this. */
+static const uint16_t cp850[128] = {
+   0xC7, 0xFC, 0xE9, 0xE2, 0xE4, 0xE0, 0xE5, 0xE7, 0xEA, 0xEB, 0xE8, 0xEF, 0xEE, 0xEC, 0xC4, 0xC5,
+   0xC9, 0xE6, 0xC6, 0xF4, 0xF6, 0xF2, 0xFB, 0xF9, 0xFF, 0xD6, 0xDC, 0xF8, 0xA3, 0xD8, 0xD7, 0x192,
+   0xE1, 0xED, 0xF3, 0xFA, 0xF1, 0xD1, 0xAA, 0xBA, 0xBF, 0xAE, 0xAC, 0xBD, 0xBC, 0xA1, 0xAB, 0xBB,
+   0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0xC1, 0xC2, 0xC0, 0xA9, 0x2563, 0x2551, 0x2557, 0x255D, 0xA2, 0xA5, 0x2510,
+   0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0xE3, 0xC3, 0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0xA4,
+   0xF0, 0xD0, 0xCA, 0xCB, 0xC8, 0x131, 0xCD, 0xCE, 0xCF, 0x2518, 0x250C, 0x2588, 0x2584, 0xA6, 0xCC, 0x2580,
+   0xD3, 0xDF, 0xD4, 0xD2, 0xF5, 0xD5, 0xB5, 0xFE, 0xDE, 0xDA, 0xDB, 0xD9, 0xFD, 0xDD, 0xAF, 0xB4,
+   0xAD, 0xB1, 0x2017, 0xBE, 0xB6, 0xA7, 0xF7, 0xB8, 0xB0, 0xA8, 0xB7, 0xB9, 0xB3, 0xB2, 0x25A0, 0xA0
+};
+
+static bool oem_client(const tnd_in_t *s)
+{
+   return s->ttype_got && strncmp(s->ttype, "ANSI", 4) == 0;
+}
+
 /* A byte that is not part of a command or an escape sequence. */
 static size_t plain_byte(tnd_in_t *s, uint8_t c, uint8_t *keys)
 {
@@ -132,7 +154,7 @@ static size_t plain_byte(tnd_in_t *s, uint8_t c, uint8_t *keys)
       }
       s->u8_need = 0u;                          /* broken: this byte read afresh */
       if (s->u8_lead != 0u) {                   /* a lone lead byte was a Latin-1 client's character (&E9) */
-         size_t n = char_key(s, s->u8_lead, keys);
+         size_t n = char_key(s, oem_client(s) ? cp850[s->u8_lead - 0x80u] : s->u8_lead, keys);
          s->u8_lead = 0u;
          return n + plain_byte(s, c, keys + n);
       }
@@ -171,8 +193,8 @@ static size_t plain_byte(tnd_in_t *s, uint8_t c, uint8_t *keys)
       s->u8_lead = c;
       return 0u;
    }
-   if (c >= 0x80u)                              /* not UTF-8: a Latin-1 client's byte */
-      return char_key(s, c, keys);
+   if (c >= 0x80u)                              /* not UTF-8: a Latin-1 client's byte, or Windows telnet's */
+      return char_key(s, oem_client(s) ? cp850[c - 0x80u] : c, keys);
    keys[0] = c;
    return 1u;
 }
@@ -209,6 +231,18 @@ static uint8_t arrow(uint8_t f)
    }
 }
 
+/* SHIFT and CTRL with a function key, a cursor key or COPY: xterm's modifier parameter (ESC [ n ; m ~,
+   ESC [ 1 ; m A), where m - 1 holds SHIFT 1, Alt 2, CTRL 4.  The Beeb's keyboard scan stores those keys
+   (&80-&8F) &10 higher with SHIFT and &20 higher with CTRL, and OSBYTE 4 and 225-228 then make of them what
+   the program asked for, as for the real keys.  Alt is not a Beeb key. */
+static uint8_t with_mods(const tnd_in_t *s, uint8_t k)
+{
+   if (k < 0x80u || k > 0x8Fu || s->nparam < 1u || s->param[1] < 2u)
+      return k;
+   unsigned m = (unsigned)s->param[1] - 1u;
+   return (uint8_t)(k + ((m & 1u) != 0u ? 0x10u : 0u) + ((m & 4u) != 0u ? 0x20u : 0u));
+}
+
 /* The final byte of ESC [ params f. */
 static uint8_t csi_key(const tnd_in_t *s, uint8_t f)
 {
@@ -221,11 +255,13 @@ static uint8_t csi_key(const tnd_in_t *s, uint8_t f)
    if (f == '~') {
       switch (s->param[0]) {
       case 3: return 127u;
-      case 4: case 8: return 139u;                /* End: COPY */
-      default: return fkey_csi(s->param[0]);
+      case 4: case 8: return with_mods(s, 139u);  /* End: COPY */
+      default: return with_mods(s, fkey_csi(s->param[0]));
       }
    }
-   return arrow(f);
+   if (f >= 'P' && f <= 'S')                     /* F1-F4 with a modifier: ESC [ 1 ; m P */
+      return with_mods(s, (uint8_t)(0x81u + (unsigned)f - (unsigned)'P'));
+   return with_mods(s, arrow(f));
 }
 
 /* The terminal's name, in its answer to XTVERSION (CSI > q): "|XTerm(379)" from xterm, which has a
