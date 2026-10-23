@@ -153,6 +153,10 @@ typedef struct {
    bool    coloured;            /* a colour was set: reset it at the end of the line */
    bool    utf8;                /* the pound sign as UTF-8 (else Latin-1) */
    bool    sep_glyphs;          /* MODE 7's separated mosaics as separated sextants (U+1CE51-); else as contiguous */
+   bool    bbcfont;             /* telnetd_font=bbc: the terminal has the BBC Micro MOS font with its private-use
+                                   pieces, 80 columns wide: each Beeb character is drawn as 80 / cols pieces of
+                                   it (halves in 40 columns and MODE 7, quarters in 20), each MODE in its own
+                                   shape, and teletext double height as top and bottom pieces, not DECDHL */
 
    /* a model of the Beeb's text screen: see telnetd_proto.c */
    bool     sync;               /* the cursor position is known (a CLS, MODE, TAB ... was seen) */

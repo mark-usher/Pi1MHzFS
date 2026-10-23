@@ -40,7 +40,9 @@ foreach ($f in $fonts.Keys) {
     $src = Join-Path $kit $f
     $dst = Join-Path $fontDir $f
     if (-not (Test-Path $dst) -or (Get-FileHash $src).Hash -ne (Get-FileHash $dst).Hash) {
-        if (Test-Path $dst) { [void][TelnetD.Font]::RemoveFontResourceW($dst) }    # a new version: unload the old
+        if (Test-Path $dst) {                    # a new version: unload the old, once for each time it was loaded
+            for ($n = 0; $n -lt 32 -and [TelnetD.Font]::RemoveFontResourceW($dst) -ne 0; $n++) { }
+        }
         try { Copy-Item $src $dst -Force }
         catch {
             Write-Host "$($fonts[$f]) is in use (an open Windows Terminal or PuTTY window): close them and run this again."

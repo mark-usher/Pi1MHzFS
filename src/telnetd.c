@@ -35,6 +35,10 @@
      telnetd_utf8=1       the pound sign as UTF-8; 0: Latin-1
      telnetd_palette=1    set the terminal's colours to the BBC's at connect (OSC 4/10/11/12);
                           0: leave the terminal's own colour scheme
+     telnetd_font=        bbc: the terminal has the BBC Micro MOS font (tools/telnetd-terminal), 80 x 32:
+                          every MODE is drawn in its own shape in that one window, a character
+                          as 1, 2 or 4 of the font's private-use pieces, teletext double height
+                          as top and bottom pieces; anything else: plain characters
      telnetd_separated=1  MODE 7's separated graphics as Unicode 16's separated sextants;
                           0: as contiguous ones (for a terminal font without them)
      telnetd_login=1      0: no login at all, open to the network
@@ -1355,24 +1359,33 @@ void telnetd_poll(uint32_t now_us, bool beeb_attached)
       if (ready && !g_warned) {
          g_warned = true;
          o_str("\r\n");
+         /* With the BBC font every MODE fills 80 x 32 (MODE 7 25 rows of it), and the Beeb changes MODE
+            under a session: that is the size it needs. */
+         unsigned need_c = g_out.bbcfont ? 80u : g_out.cols, need_r = g_out.bbcfont ? 32u : g_out.rows;
          if (g_ansi && g_win_first && g_in.win_rows != 0u && g_in.win_cols != 0u
-             && (g_in.win_rows < g_out.rows || g_in.win_cols < g_out.cols)) {
+             && (g_in.win_rows < need_r || g_in.win_cols < need_c)) {
             char w[160];
             /* A client that reports a resize has the screen drawn again by itself; Windows telnet
                (terminal type ANSI) reports its size only when it connects, so it needs F11. */
             bool no_naws_change = g_in.ttype_got && strncmp(g_in.ttype, "ANSI", 4) == 0;
-            snprintf(w, sizeof w, "\r\nThis window is %u x %u, smaller than the Beeb's MODE %u (%u x %u):\r\n"
-                     "%s\r\n",
-                     (unsigned)g_in.win_cols, (unsigned)g_in.win_rows, (unsigned)g_out.mode,
-                     (unsigned)g_out.cols, (unsigned)g_out.rows,
-                     no_naws_change ? "make it bigger, then press F11." : "make it bigger and the screen is drawn again.");
+            if (g_out.bbcfont)
+               snprintf(w, sizeof w, "\r\nThis window is %u x %u: the BBC font needs 80 x 32 for every MODE.\r\n%s\r\n",
+                        (unsigned)g_in.win_cols, (unsigned)g_in.win_rows,
+                        no_naws_change ? "make it bigger, then press F11." : "make it bigger and the screen is drawn again.");
+            else
+               snprintf(w, sizeof w, "\r\nThis window is %u x %u, smaller than the Beeb's MODE %u (%u x %u):\r\n"
+                        "%s\r\n",
+                        (unsigned)g_in.win_cols, (unsigned)g_in.win_rows, (unsigned)g_out.mode,
+                        (unsigned)g_out.cols, (unsigned)g_out.rows,
+                        no_naws_change ? "make it bigger, then press F11." : "make it bigger and the screen is drawn again.");
             o_str(w);
             g_warn_until = now_us + CONNECT_WARN_US;
             if (g_warn_until == 0u)
                g_warn_until = 1u;
          }
       } else if (ready && (g_warn_until == 0u || (int32_t)(now_us - g_warn_until) >= 0
-                           || (g_in.win_rows >= g_out.rows && g_in.win_cols >= g_out.cols))) {   /* made big enough */
+                           || (g_in.win_rows >= (g_out.bbcfont ? 32u : g_out.rows)
+                               && g_in.win_cols >= (g_out.bbcfont ? 80u : g_out.cols)))) {   /* made big enough */
          g_connecting = false;
          if (g_ansi && g_tek && g_in.ttype_got
              && (strncmp(g_in.ttype, "XTERM", 5) == 0 || strncmp(g_in.ttype, "xterm", 5) == 0))
@@ -1563,6 +1576,10 @@ void telnetd_init(void)
    g_debug = cfg_flag("telnetd_debug", false);
    tnd_out_reset(&g_out, g_utf8);
    g_out.sep_glyphs = cfg_flag("telnetd_separated", true);
+   {
+      const char *f = config_get("telnetd_font");
+      g_out.bbcfont = f != NULL && (f[0] == 'b' || f[0] == 'B');   /* telnetd_font=bbc */
+   }
    {
       const char *m = config_get("telnetd_mode");
       long mode = (m != NULL && m[0] != '\0') ? strtol(m, NULL, 10) : 7;

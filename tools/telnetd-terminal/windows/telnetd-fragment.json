@@ -7,7 +7,7 @@
             "colorScheme": "BBC Micro",
             "font": {
                 "face": "BBC Micro Teletext",
-                "size": 15
+                "size": 12.5
             },
             "cursorShape": "filledBox",
             "padding": "8",
@@ -24,7 +24,7 @@
             "colorScheme": "BBC Micro",
             "font": {
                 "face": "BBC Micro MOS",
-                "size": 15
+                "size": 12.5
             },
             "cursorShape": "filledBox",
             "padding": "8",
@@ -41,7 +41,7 @@
             "colorScheme": "BBC Micro",
             "font": {
                 "face": "BBC Micro MOS 40",
-                "size": 15
+                "size": 12.5
             },
             "cursorShape": "filledBox",
             "padding": "8",
@@ -58,7 +58,7 @@
             "colorScheme": "BBC Micro",
             "font": {
                 "face": "BBC Micro MOS 20",
-                "size": 15
+                "size": 12.5
             },
             "cursorShape": "filledBox",
             "padding": "8",

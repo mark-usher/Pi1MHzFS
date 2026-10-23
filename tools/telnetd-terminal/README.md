@@ -54,6 +54,32 @@ for MODE 7, and 8 x 16, 16 x 16 and 32 x 16 for the others. The Linux console
 supports only the Basic Multilingual Plane, so the console fonts have no sextants.
 On the console a mosaic is shown as the nearest block character instead.
 
+## One window for every MODE: `telnetd_font=bbc` (recommended)
+
+A program changes MODE as it runs, and a window can't change its font with it. Put
+this line in the Pi's `Pi1MHz.cfg` and restart the Pi:
+
+    telnetd_font=bbc
+
+TelnetD then draws every MODE in its own shape in one 80 x 32 window, using the
+"BBC Micro MOS" font. The font holds each MODE's characters as pieces in Unicode's
+private-use area:
+- MODE 0 and 3: a character is one cell;
+- MODE 1, 4 and 6: two cells, the left and right halves of the character;
+- MODE 2 and 5: four cells, its quarters;
+- MODE 7: two cells, with the teletext chip's characters, contiguous and separated
+  mosaics, and separate top and bottom pieces for double height. So double height
+  isn't double width, as it is with the terminal's own double-height lines.
+
+Use the "BBC Micro MODE 0/3" profile, the "BBC Micro MODE 0-3" PuTTY session or the
+MODE 0 `beeb-telnet` (`-m 0`): all of them use that font. The window must be at least
+80 x 32; TelnetD says so when you connect to a smaller one. MODE 7 uses the top 25
+rows, with characters about a tenth wider than on the Beeb.
+
+Only a terminal with this font installed can show the pieces: in any other font they
+come out as empty boxes, and text copied out of the window is the pieces' codes, not
+letters. Leave `telnetd_font` out to have plain characters again.
+
 ## Windows
 
 TelnetD sends the pound sign and the teletext graphics as UTF-8. Windows' own
@@ -80,9 +106,14 @@ the profiles when it starts, so close all its windows first.
 Then do either of these:
 
 - choose one of the profiles from Windows Terminal's new-tab menu;
-- double-click `windows\BBC-Micro-telnet.cmd`. It opens a MODE 7 window, 40 x 25.
-  You can give a host and a MODE: `BBC-Micro-telnet.cmd 192.168.1.50 0` opens an
-  80 x 32 window for MODE 0.
+- double-click `windows\BBC-Micro-telnet.cmd`. It opens a MODE 7 window. You can
+  give a host and a MODE: `BBC-Micro-telnet.cmd 192.168.1.50 0` opens the MODE 0
+  profile.
+
+The profiles use 12.5-point fonts. Windows Terminal 1.25 ignores the window size it
+is given on its command line and opens every window at its default size (120 x 30 in
+its own font); at 12.5 points that holds 32 rows of the BBC fonts. A bigger font
+needs a bigger window, which you can drag to size: TelnetD draws the screen again.
 
 Windows' telnet client is an optional feature. To turn it on, run this once from an
 administrator command prompt:

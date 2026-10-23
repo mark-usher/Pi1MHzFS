@@ -798,34 +798,78 @@ static size_t put_num(uint8_t *dst, unsigned v)
    return n;
 }
 
-/* ESC [ row ; col H for the zero-based cell x, y. */
+/* telnetd_font=bbc: how many terminal cells one Beeb character takes (80 / the Beeb's columns: 1 in MODE 0
+   and 3, 2 in MODE 1, 4, 6 and 7, 4 in MODE 2 and 5); 1 without the font. */
+static unsigned kf(const tnd_out_t *s)
+{
+   return (s->bbcfont && s->cols != 0u) ? 80u / s->cols : 1u;
+}
+
 /* The cursor to column x (from 0) of the row it is on: CR, then forward.  Not CHA (ESC [ n G):
    Windows' telnet client misreads it (the cursor goes to the next line, and what follows is
    garbled), while CR and cursor forward work in every VT100-style terminal. */
-static size_t put_col(uint8_t *dst, unsigned x)
+static size_t put_col(const tnd_out_t *s, uint8_t *dst, unsigned x)
 {
    size_t n = 0u;
    dst[n++] = 13u;
    if (x != 0u) {
       dst[n++] = 27u;
       dst[n++] = '[';
-      n += put_num(dst + n, x);
+      n += put_num(dst + n, x * kf(s));
       dst[n++] = 'C';
    }
    return n;
 }
 
-static size_t put_pos(uint8_t *dst, unsigned x, unsigned y)
+/* ESC [ row ; col H for the zero-based cell x, y. */
+static size_t put_pos(const tnd_out_t *s, uint8_t *dst, unsigned x, unsigned y)
 {
    size_t n = 0u;
    dst[n++] = 27u;
    dst[n++] = '[';
    n += put_num(dst + n, y + 1u);
    dst[n++] = ';';
-   n += put_num(dst + n, x + 1u);
+   n += put_num(dst + n, x * kf(s) + 1u);
    dst[n++] = 'H';
    return n;
 }
+
+/* The cursor one Beeb cell left (BS) or right (CUF): kf terminal cells. */
+static size_t put_bs(const tnd_out_t *s, uint8_t *dst)
+{
+   unsigned k = kf(s);
+   for (unsigned i = 0u; i < k; i++)
+      dst[i] = 8u;
+   return k;
+}
+
+static size_t put_right(const tnd_out_t *s, uint8_t *dst)
+{
+   size_t n = 0u;
+   dst[n++] = 27u;
+   dst[n++] = '[';
+   if (kf(s) != 1u)
+      n += put_num(dst + n, kf(s));
+   dst[n++] = 'C';
+   return n;
+}
+
+/* A private-use code point (U+E000-U+F8FF) as UTF-8. */
+static size_t put_pua(uint8_t *dst, unsigned cp)
+{
+   dst[0] = (uint8_t)(0xE0u | (cp >> 12));
+   dst[1] = (uint8_t)(0x80u | ((cp >> 6) & 0x3Fu));
+   dst[2] = (uint8_t)(0x80u | (cp & 0x3Fu));
+   return 3u;
+}
+
+/* The pieces of the BBC Micro MOS font (telnetd_font=bbc): a MOS character c (32-127, 96 the pound) in
+   halves at U+E000 + 2c, in quarters at U+E100 + 4c; a teletext cell g (32-127 the chip's characters by
+   their screen codes, 128 + n a contiguous mosaic, 192 + n a separated one, n the six cells) in halves at
+   U+E300 + 2 (256 v + g), v 0 for normal height, 1 the top and 2 the bottom of double height. */
+#define PUA_MOS2  0xE000u
+#define PUA_MOS4  0xE100u
+#define PUA_TTX   0xE300u
 
 /* An absolute cursor move.  If the terminal's rows are not the Beeb's yet (a terminal
    that was drawn under its greeting), it is cleared first, once, and they are. */
@@ -837,7 +881,7 @@ static size_t abs_pos(tnd_out_t *s, uint8_t *dst, unsigned x, unsigned y)
       n += put_str(dst, "\x1b[2J");
       s->origin_ok = true;
    }
-   n += put_pos(dst + n, x, y);
+   n += put_pos(s, dst + n, x, y);
    return n;
 }
 
@@ -858,9 +902,18 @@ static size_t put_attr(const tnd_out_t *s, uint8_t *dst, uint8_t at)
    return n;
 }
 
-/* A stored cell character as the terminal wants it: 96 is the Beeb's pound. */
+/* A stored cell character as the terminal wants it: 96 is the Beeb's pound.  With the BBC font in 40 or
+   20 columns, its halves or quarters. */
 static size_t put_glyph(const tnd_out_t *s, uint8_t *dst, uint8_t ch)
 {
+   unsigned k = kf(s);
+   if (k != 1u) {
+      size_t n = 0u;
+      unsigned base = (k == 2u ? PUA_MOS2 : PUA_MOS4) + (unsigned)(ch & 0x7Fu) * k;
+      for (unsigned i = 0u; i < k; i++)
+         n += put_pua(dst + n, base + i);
+      return n;
+   }
    if (ch == 96u) {
       if (s->utf8) {
          dst[0] = 0xC2u; dst[1] = 0xA3u;
@@ -896,7 +949,14 @@ typedef struct {
    uint8_t fg, bg, held;
    bool    gfx, sep, hold, flash, conceal, dh, held_sep;
    bool    sep_ok;                              /* separated mosaics as Unicode 16's separated sextants */
+   uint16_t gid;                                /* the last cell as the BBC font's teletext cell (PUA_TTX) */
 } ttx_t;
+
+/* A mosaic as the BBC font's teletext cell: 128 + its six cells, 192 + them separated. */
+static uint16_t ttx_gid_mosaic(uint8_t b, bool sep)
+{
+   return (uint16_t)((sep ? 192u : 128u) + ((b & 0x1Fu) | ((b & 0x40u) >> 1)));
+}
 
 static void ttx_init(ttx_t *t, const tnd_out_t *s)
 {
@@ -967,6 +1027,7 @@ static void ttx_step(ttx_t *t, uint8_t b, uint32_t *cp, uint8_t *fg, uint8_t *bg
       default: break;
       }
       *cp = (t->hold && t->gfx) ? ttx_mosaic(t->held, t->held_sep && t->sep_ok) : ' ';
+      t->gid = (t->hold && t->gfx) ? ttx_gid_mosaic(t->held, t->held_sep) : 32u;
       *fg = t->fg; *bg = t->bg; *flash = t->flash;
       if (b >= 0x81u && b <= 0x87u) {           /* set after: from the next cell */
          t->fg = (uint8_t)(b & 7u);
@@ -990,13 +1051,17 @@ static void ttx_step(ttx_t *t, uint8_t b, uint32_t *cp, uint8_t *fg, uint8_t *bg
    }
    if (t->gfx && (b & 0x20u) != 0u) {
       *cp = ttx_mosaic(b, t->sep && t->sep_ok);
+      t->gid = ttx_gid_mosaic(b, t->sep);
       t->held = b;
       t->held_sep = t->sep;
    } else {
       *cp = ttx_alpha(b);                       /* in graphics, &40-&5F blast through as capitals */
+      t->gid = (b >= 0x20u && b <= 0x7Fu) ? b : 32u;
    }
-   if (t->conceal)
+   if (t->conceal) {
       *cp = ' ';
+      t->gid = 32u;
+   }
    *fg = t->fg; *bg = t->bg; *flash = t->flash;
 }
 
@@ -1071,6 +1136,26 @@ static size_t ttx_sgr(uint8_t *tsgr, uint8_t *dst, uint8_t fg, uint8_t bg, bool 
    return n;
 }
 
+static uint8_t ttx_lattr(const tnd_out_t *s, unsigned y);
+
+/* A teletext cell in the BBC font: its two halves, v 0 normal height, 1 and 2 the top and bottom of
+   double height. */
+static size_t ttx_put_piece(uint8_t *dst, uint16_t gid, unsigned v)
+{
+   unsigned cp = PUA_TTX + 2u * (256u * v + gid);
+   size_t   n = put_pua(dst, cp);
+   return n + put_pua(dst + n, cp + 1u);
+}
+
+/* The cell just stepped (t) as the terminal shows it: its character, or with the BBC font its pieces, the
+   double height ones on a double height row (la: ttx_lattr). */
+static size_t ttx_put_cell(const tnd_out_t *s, uint8_t *dst, const ttx_t *t, uint32_t cp, uint8_t la)
+{
+   if (!s->bbcfont)
+      return ttx_put_cp(s, dst, cp);
+   return ttx_put_piece(dst, t->gid, (t->dh && la != 0u) ? (la == 3u ? 1u : 2u) : 0u);
+}
+
 /* Cells x0 to x1 of row y, from the terminal's cursor on, *tsgr the colours the terminal
    has: at most room bytes.  Returns the bytes written; *done is the last cell drawn (x0 - 1
    if none fitted). */
@@ -1080,6 +1165,7 @@ static size_t ttx_cells(const tnd_out_t *s, uint8_t *tsgr, uint8_t *dst, unsigne
    ttx_t    t;
    size_t   n = 0u;
    uint32_t cp; uint8_t fg, bg; bool fl;
+   uint8_t  la = s->bbcfont ? ttx_lattr(s, y) : 0u;
 
    ttx_state(s, y, x0, &t);
    *done = x0 - 1u;
@@ -1089,7 +1175,7 @@ static size_t ttx_cells(const tnd_out_t *s, uint8_t *tsgr, uint8_t *dst, unsigne
       ttx_step(&t, s->ch[y][x], &cp, &fg, &bg, &fl);
       uint8_t save = *tsgr;
       k = ttx_sgr(tsgr, buf, fg, bg, fl);
-      k += ttx_put_cp(s, buf + k, cp);
+      k += ttx_put_cell(s, buf + k, &t, cp, la);
       if (n + k > room) {
          *tsgr = save;
          break;
@@ -1155,6 +1241,8 @@ static size_t ttx_put_lattr(uint8_t *dst, uint8_t a)
    return put_str(dst, a == 3u ? "\x1b#3" : a == 4u ? "\x1b#4" : "\x1b#5");
 }
 
+static void mark_dirty(tnd_out_t *s, unsigned l, unsigned t, unsigned r, unsigned b);
+
 /* Bring the terminal's line attributes into line with the model's rows, the cursor put back
    after.  Needs absolute positions. */
 static size_t ttx_sync_lattr(tnd_out_t *s, uint8_t *dst, size_t room)
@@ -1170,15 +1258,20 @@ static size_t ttx_sync_lattr(tnd_out_t *s, uint8_t *dst, size_t room)
       prev = a;
       if (a == s->lattr[y])
          continue;
+      if (s->bbcfont) {                          /* no line attributes: the row drawn again in other pieces */
+         s->lattr[y] = a;
+         mark_dirty(s, 0u, y, (unsigned)s->cols - 1u, y);
+         continue;
+      }
       if (n + 16u > room)
          break;
-      n += put_pos(dst + n, 0u, y);
+      n += put_pos(s, dst + n, 0u, y);
       n += ttx_put_lattr(dst + n, a);
       s->lattr[y] = a;
       moved = true;
    }
    if (moved)
-      n += put_pos(dst + n, s->cx, s->cy);
+      n += put_pos(s, dst + n, s->cx, s->cy);
    return n;
 }
 
@@ -1188,8 +1281,10 @@ static size_t ttx_clear_lattr(tnd_out_t *s, uint8_t *dst)
 {
    size_t n = 0u;
    for (unsigned y = 0u; y < TND_ROWS_MAX; y++)
-      if (s->lattr[y] != 0u) {
-         n += put_pos(dst + n, 0u, y);
+      if (s->lattr[y] != 0u && s->bbcfont) {
+         s->lattr[y] = 0u;                       /* the BBC font sends no line attributes */
+      } else if (s->lattr[y] != 0u) {
+         n += put_pos(s, dst + n, 0u, y);
          n += put_str(dst + n, "\x1b#5");
          s->lattr[y] = 0u;
       }
@@ -1209,7 +1304,7 @@ static size_t ttx_plain(tnd_out_t *s, uint8_t *dst)
 /* Put the terminal's colours back to what the Beeb has set, and its cursor to the Beeb's. */
 static size_t put_finish(const tnd_out_t *s, uint8_t *dst)
 {
-   size_t n = put_pos(dst, s->cx, s->cy);
+   size_t n = put_pos(s, dst, s->cx, s->cy);
    n += put_str(dst + n, "\x1b[0m");
    if (s->coloured) {
       n += sgr(dst + n, '3', phys(s, s->fg));
@@ -1304,7 +1399,7 @@ static size_t scr_scroll_up(tnd_out_t *s, uint8_t *dst)
       /* Index on the region's last row, not Scroll Up (ESC [ 1 S): Windows' telnet client ignores
          SU and garbles what follows it (the region reset came out as "[r").  The reset homes the
          cursor, as before. */
-      n += put_pos(dst + n, 0u, s->wb);
+      n += put_pos(s, dst + n, 0u, s->wb);
       n += put_str(dst + n, "\x1b" "D\x1b[r");
       n += ttx_sync_lattr(s, dst + n, 200u);     /* a scroll can change which half a double row is */
    } else if (s->sync && s->origin_ok) {
@@ -1342,7 +1437,7 @@ static size_t scr_scroll_down(tnd_out_t *s, uint8_t *dst)
       n += put_num(dst + n, (unsigned)s->wb + 1u);
       dst[n++] = 'r';
       /* Reverse Index on the region's first row, not Scroll Down (ESC [ 1 T): see above. */
-      n += put_pos(dst + n, 0u, s->wt);
+      n += put_pos(s, dst + n, 0u, s->wt);
       n += put_str(dst + n, "\x1bM\x1b[r");
       n += ttx_sync_lattr(s, dst + n, 200u);     /* a scroll can change which half a double row is */
    } else if (s->sync && s->origin_ok) {
@@ -1357,7 +1452,7 @@ static size_t put_left(const tnd_out_t *s, uint8_t *dst)
    size_t n = 0u;
    if (s->wl != 0u) {
       dst[n++] = 27u; dst[n++] = '[';
-      n += put_num(dst + n, s->wl);
+      n += put_num(dst + n, s->wl * kf(s));
       dst[n++] = 'C';
    }
    return n;
@@ -1375,7 +1470,7 @@ static size_t scr_newline(tnd_out_t *s, uint8_t *dst)
       s->cy++;
    if (s->sync && s->origin_ok) {
       n += row_changed(s, dst + n);
-      n += put_pos(dst + n, s->cx, s->cy);
+      n += put_pos(s, dst + n, s->cx, s->cy);
    } else if (s->colok) {                        /* the column is known: a CR LF is the Beeb's wrap */
       dst[n++] = 13u;
       dst[n++] = 10u;
@@ -1413,7 +1508,7 @@ static size_t ttx_glyph(tnd_out_t *s, uint8_t c, uint8_t *dst)
    if (done < end && s->origin_ok)
       mark_dirty(s, done + 1u, s->cy, end, s->cy);
    if (end > s->cx && s->cx < s->wr)            /* back to the cell after this one */
-      n += put_col(dst + n, (unsigned)s->cx + 1u);
+      n += put_col(s, dst + n, (unsigned)s->cx + 1u);
    if (s->cx < s->wr)
       s->cx++;
    else
@@ -1639,7 +1734,7 @@ static size_t glyph(tnd_out_t *s, uint8_t c, uint8_t *dst, uint8_t *stored, int 
          n = sgr(dst, '3', colour);
          *newfg = colour;
       }
-      dst[n++] = ' ';
+      n += put_glyph(s, dst + n, ' ');
       *stored = ' ';
       return n;
    }
@@ -1682,35 +1777,35 @@ static size_t out_byte(tnd_out_t *s, uint8_t c, uint8_t *dst)
       case 8:                                   /* cursor left; at the edge, the end of the line above */
          if (s->cx > s->wl) {
             s->cx--;
-            dst[n++] = 8u;
+            n += put_bs(s, dst + n);
          } else if (s->cy > s->wt) {
             s->cx = s->wr;
             s->cy--;
             if (s->sync && s->origin_ok) {
                n += row_changed(s, dst + n);
-               n += put_pos(dst + n, s->cx, s->cy);
+               n += put_pos(s, dst + n, s->cx, s->cy);
             } else {
-               dst[n++] = 8u;
+               n += put_bs(s, dst + n);
             }
          } else {
-            dst[n++] = 8u;
+            n += put_bs(s, dst + n);
          }
          break;
       case 9:                                   /* cursor right; at the edge, the start of the next line */
          if (s->cx < s->wr) {
             s->cx++;
-            n = put_str(dst, "\x1b[C");
+            n = put_right(s, dst);
          } else if (s->sync && s->origin_ok) {
             n += scr_newline(s, dst + n);
          } else {
-            n = put_str(dst, "\x1b[C");
+            n = put_right(s, dst);
          }
          break;
       case 10:                                  /* down; at the bottom the window scrolls */
          if (s->cy >= s->wb) {
             n += scr_scroll_up(s, dst + n);
             if (s->sync && s->origin_ok)
-               n += put_pos(dst + n, s->cx, s->cy);
+               n += put_pos(s, dst + n, s->cx, s->cy);
             else
                dst[n++] = 10u;
          } else {
@@ -1724,7 +1819,7 @@ static size_t out_byte(tnd_out_t *s, uint8_t c, uint8_t *dst)
          if (s->cy <= s->wt) {
             n += scr_scroll_down(s, dst + n);
             if (s->sync && s->origin_ok)
-               n += put_pos(dst + n, s->cx, s->cy);
+               n += put_pos(s, dst + n, s->cx, s->cy);
             else
                n += put_str(dst + n, "\x1b[A");
          } else {
@@ -1751,7 +1846,7 @@ static size_t out_byte(tnd_out_t *s, uint8_t c, uint8_t *dst)
             scr_clear(s, s->wl, s->wt, s->wr, s->wb);
             s->cx = s->wl; s->cy = s->wt;
             mark_dirty(s, s->wl, s->wt, s->wr, s->wb);
-            n = put_pos(dst, s->cx, s->cy);
+            n = put_pos(s, dst, s->cx, s->cy);
          } else {                                /* the terminal's rows are not the Beeb's yet: start them */
             scr_clear(s, s->wl, s->wt, s->wr, s->wb);
             s->cx = s->wl; s->cy = s->wt;
@@ -1759,7 +1854,7 @@ static size_t out_byte(tnd_out_t *s, uint8_t c, uint8_t *dst)
             n = put_str(dst, "\x1b[2J");
             if (s->sync)                         /* what is outside the window comes back */
                mark_dirty(s, 0u, 0u, (unsigned)s->cols - 1u, (unsigned)s->rows - 1u);
-            n += put_pos(dst + n, s->cx, s->cy);
+            n += put_pos(s, dst + n, s->cx, s->cy);
          }
          if (s->tele)
             s->coloured = false;
@@ -1817,11 +1912,11 @@ static size_t out_byte(tnd_out_t *s, uint8_t c, uint8_t *dst)
       end = s->cx;
       if (old >= 0x80u && old < 0xA0u && before > (int)end)
          end = (unsigned)before;
-      dst[n++] = 8u;
+      n += put_bs(s, dst + n);
       n += ttx_cells(s, &s->tsgr, dst + n, s->cy, s->cx, end, TND_OUT_MAX - 160u, &done);
       if (done < end && s->origin_ok)
          mark_dirty(s, done + 1u, s->cy, end, s->cy);
-      n += put_col(dst + n, s->cx);
+      n += put_col(s, dst + n, s->cx);
       if (old == 0x8Du)
          n += ttx_sync_lattr(s, dst + n, TND_OUT_MAX - 60u - n);
       return n;
@@ -1837,19 +1932,21 @@ static size_t out_byte(tnd_out_t *s, uint8_t c, uint8_t *dst)
          s->drawn++;
          s->at[s->cy][s->cx] = AT_KNOWN | cur_attr(s);
          if (s->sync && s->origin_ok) {
-            n += put_pos(dst + n, s->cx, s->cy);
-            dst[n++] = ' ';
-            n += put_pos(dst + n, s->cx, s->cy);
+            n += put_pos(s, dst + n, s->cx, s->cy);
+            n += put_glyph(s, dst + n, ' ');
+            n += put_pos(s, dst + n, s->cx, s->cy);
             return n;
          }
-         dst[0] = 8u; dst[1] = ' '; dst[2] = 8u;
-         return 3u;
+         n += put_bs(s, dst + n);
+         n += put_glyph(s, dst + n, ' ');
+         return n + put_bs(s, dst + n);
       }
       s->ch[s->cy][s->cx] = ' ';
       s->drawn++;
       s->at[s->cy][s->cx] = AT_KNOWN | cur_attr(s);
-      dst[0] = 8u; dst[1] = ' '; dst[2] = 8u;
-      return 3u;
+      n += put_bs(s, dst + n);
+      n += put_glyph(s, dst + n, ' ');
+      return n + put_bs(s, dst + n);
    }
 
    if (s->tele && s->sync)
@@ -2121,7 +2218,7 @@ size_t tnd_out_repaint(const tnd_out_t *s, unsigned row, uint8_t dst[TND_REPAINT
             n += sgr(dst + n, '4', phys(s, s->bg));
       }
       n += put_str(dst + n, s->curoff ? "\x1b[?25l" : "\x1b[?25h");
-      n += put_col(dst + n, s->cx);              /* the column last */
+      n += put_col(s, dst + n, s->cx);              /* the column last */
       return n;
    }
    if (row >= s->rows || (int)row < first || (int)row > last)
@@ -2133,7 +2230,7 @@ size_t tnd_out_repaint(const tnd_out_t *s, unsigned row, uint8_t dst[TND_REPAINT
       int      tend = ttx_row_end(s, row);
       unsigned done;
       n += put_str(dst + n, "\x1b[0m");
-      if (la != 0u)
+      if (la != 0u && !s->bbcfont)
          n += ttx_put_lattr(dst + n, la);
       if (tend >= 0)
          n += ttx_cells(s, &tsgr, dst + n, row, 0u, (unsigned)tend, TND_REPAINT_MAX - 24u - n, &done);
@@ -2181,7 +2278,7 @@ size_t tnd_out_dirty_row(tnd_out_t *s, uint8_t dst[TND_REPAINT_MAX])
    }
    unsigned y = s->dt;
    uint8_t  prev = AT_DEF;
-   n += put_pos(dst, s->dl, y);
+   n += put_pos(s, dst, s->dl, y);
    n += put_str(dst + n, "\x1b[0m");
    if (s->tele) {
       unsigned done;
@@ -2300,7 +2397,7 @@ static size_t ttx_mark(const tnd_out_t *s, uint8_t *dst, unsigned x, unsigned y,
    n = ttx_sgr(&tsgr, dst, fg, bg, fl);
    if (reverse)
       n += put_str(dst + n, "\x1b[7m");
-   n += ttx_put_cp(s, dst + n, cp);
+   n += ttx_put_cell(s, dst + n, &t, cp, s->bbcfont ? ttx_lattr(s, y) : 0u);
    return n;
 }
 
@@ -2319,7 +2416,7 @@ size_t tnd_out_redraw(tnd_out_t *s, uint8_t dst[TND_COPY_MAX])
       n += ttx_sync_lattr(s, dst + n, TND_COPY_MAX - 16u - n);
    }
    mark_dirty(s, 0u, 0u, (unsigned)s->cols - 1u, (unsigned)s->rows - 1u);
-   n += put_pos(dst + n, s->cx, s->cy);
+   n += put_pos(s, dst + n, s->cx, s->cy);
    return n;
 }
 
@@ -2345,7 +2442,7 @@ size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX
    s->npend = 0u;
 
    if (s->hl_on) {                              /* the old mark goes: the cell as it was */
-      n += put_pos(dst + n, s->hlx, s->hly);
+      n += put_pos(s, dst + n, s->hlx, s->hly);
       if (s->tele) {
          n += ttx_mark(s, dst + n, s->hlx, s->hly, false);
       } else {
@@ -2356,7 +2453,7 @@ size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX
    }
    if (s->cc_on && (s->ccx != s->cx || s->ccy != s->cy)
        && (s->at[s->ccy][s->ccx] & AT_KNOWN) != 0u) {
-      n += put_pos(dst + n, s->ccx, s->ccy);
+      n += put_pos(s, dst + n, s->ccx, s->ccy);
       if (s->tele) {
          n += ttx_mark(s, dst + n, s->ccx, s->ccy, true);
       } else {
