@@ -36,10 +36,15 @@ Add-Type -Namespace TelnetD -Name Font -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
 '@
 New-Item -ItemType Directory -Force $fontDir | Out-Null
+# The same file? (.NET, not Get-FileHash: Windows PowerShell started from PowerShell 7 can fail to load it.)
+function Same-File($a, $b) {
+    if (-not (Test-Path $b)) { return $false }
+    return [Linq.Enumerable]::SequenceEqual([byte[]][IO.File]::ReadAllBytes($a), [byte[]][IO.File]::ReadAllBytes($b))
+}
 foreach ($f in $fonts.Keys) {
     $src = Join-Path $kit $f
     $dst = Join-Path $fontDir $f
-    if (-not (Test-Path $dst) -or (Get-FileHash $src).Hash -ne (Get-FileHash $dst).Hash) {
+    if (-not (Same-File $src $dst)) {
         if (Test-Path $dst) {                    # a new version: unload the old, once for each time it was loaded
             for ($n = 0; $n -lt 32 -and [TelnetD.Font]::RemoveFontResourceW($dst) -ne 0; $n++) { }
         }
