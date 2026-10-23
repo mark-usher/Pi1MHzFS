@@ -1,6 +1,6 @@
 # install.ps1 - the BBC Micro look for a telnet session to TelnetD, for the current Windows user (no administrator
 # rights): the four BBC Micro fonts (one for each width of the Beeb's screen: MODE 7, MODE 0/3, MODE 1/4/6, MODE 2/5),
-# a Windows Terminal profile for each with the BBC's colours, and connect.cmd, which they run.
+# and a Windows Terminal profile for each with the BBC's colours.
 # Run by install.cmd.  Remove with: install.ps1 -Remove
 param([switch]$Remove)
 $ErrorActionPreference = 'Stop'
@@ -15,7 +15,7 @@ $fonts = [ordered]@{
     'BBCMicroMOS20.ttf'    = 'BBC Micro MOS 20'
 }
 $fragDir = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\Pi1MHz TelnetD'
-$appDir = Join-Path $env:LOCALAPPDATA 'Pi1MHz TelnetD'
+$oldDirs = 'Pi1MHz TelnetD', 'Pi1MHz-TelnetD' | % { Join-Path $env:LOCALAPPDATA $_ }   # earlier kits' helper folders
 
 if ($Remove) {
     foreach ($f in $fonts.Keys) {
@@ -23,7 +23,7 @@ if ($Remove) {
         Remove-Item (Join-Path $fontDir $f) -ErrorAction SilentlyContinue
     }
     Remove-Item $fragDir -Recurse -ErrorAction SilentlyContinue
-    Remove-Item $appDir -Recurse -ErrorAction SilentlyContinue
+    Remove-Item $oldDirs -Recurse -ErrorAction SilentlyContinue
     Write-Host 'Removed the BBC Micro fonts and the Windows Terminal profiles.'
     return
 }
@@ -54,15 +54,16 @@ foreach ($f in $fonts.Keys) {
 $r = [IntPtr]::Zero
 [void][TelnetD.Font]::SendMessageTimeoutW([IntPtr]0xffff, 0x001D, [IntPtr]::Zero, [IntPtr]::Zero, 2, 1000, [ref]$r)
 
-# connect.cmd (the profiles run it) and the profiles: Windows Terminal picks up "fragments" from this folder by itself
-New-Item -ItemType Directory -Force $appDir | Out-Null
-Copy-Item (Join-Path $here 'connect.cmd') (Join-Path $appDir 'connect.cmd') -Force
-New-Item -ItemType Directory -Force $fragDir | Out-Null
-Copy-Item (Join-Path $here 'telnetd-fragment.json') (Join-Path $fragDir 'telnetd.json') -Force
-Write-Host 'Windows Terminal profiles added: BBC Micro MODE 7, MODE 0/3, MODE 1/4/6, MODE 2/5'
-
+# The profiles: Windows Terminal picks up "fragments" from this folder by itself.  They run WSL's telnet when WSL has
+# one (it shows UTF-8: the pound sign and the teletext graphics), else Windows' telnet.exe.
+Remove-Item $oldDirs -Recurse -ErrorAction SilentlyContinue
 $wsl = $false
 try { & wsl.exe -e sh -c 'command -v telnet' *> $null; $wsl = ($LASTEXITCODE -eq 0) } catch { }
+$frag = Get-Content (Join-Path $here 'telnetd-fragment.json') -Raw
+if (-not $wsl) { $frag = $frag.Replace('wsl.exe -e telnet', 'telnet.exe') }
+New-Item -ItemType Directory -Force $fragDir | Out-Null
+Set-Content (Join-Path $fragDir 'telnetd.json') $frag -NoNewline
+Write-Host 'Windows Terminal profiles added: BBC Micro MODE 7, MODE 0/3, MODE 1/4/6, MODE 2/5'
 if (-not $wsl) {
     Write-Host ''
     Write-Host "WSL has no telnet client, so the profiles use Windows' own telnet.exe, which cannot show the pound sign"

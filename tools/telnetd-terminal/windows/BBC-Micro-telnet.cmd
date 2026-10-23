@@ -19,4 +19,7 @@ if "%MODE%"=="4" (set "PROFILE=BBC Micro MODE 1/4/6" & set SIZE=40,32)
 if "%MODE%"=="6" (set "PROFILE=BBC Micro MODE 1/4/6" & set SIZE=40,32)
 if "%MODE%"=="2" (set "PROFILE=BBC Micro MODE 2/5" & set SIZE=20,32)
 if "%MODE%"=="5" (set "PROFILE=BBC Micro MODE 2/5" & set SIZE=20,32)
-start "" wt.exe -w new --size %SIZE% -p "%PROFILE%" cmd.exe /c "%LOCALAPPDATA%\Pi1MHz TelnetD\connect.cmd" %HOST%
+rem the client: WSL's telnet if there is one (it shows UTF-8: the pound sign, the teletext graphics), else telnet.exe
+set CLIENT=telnet.exe
+wsl.exe -e sh -c "command -v telnet" >nul 2>&1 && set CLIENT=wsl.exe -e telnet
+start "" wt.exe -w new --size %SIZE% -p "%PROFILE%" %CLIENT% %HOST%
