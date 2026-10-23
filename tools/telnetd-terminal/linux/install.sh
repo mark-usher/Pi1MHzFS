@@ -41,5 +41,5 @@ echo "TrueType fonts: $TTFDIR (\"BBC Micro Teletext\", \"BBC Micro MOS\", \"BBC 
 
 mkdir -p "$BIN"
 install -m 755 "$HERE/beeb-telnet" "$BIN/beeb-telnet"
-echo "Command: $BIN/beeb-telnet [-m MODE] [host]   (MODE 7 and host Pi1MHz if not given)"
+echo "Command: $BIN/beeb-telnet [-m 7] [host]   (every MODE, or -m 7 for MODE 7 exactly; host Pi1MHz if not given)"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "Add $BIN to your PATH (it is there after logging in again on Debian)." ;; esac

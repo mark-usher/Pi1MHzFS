@@ -17,10 +17,19 @@ $fonts = [ordered]@{
 $fragDir = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\Pi1MHz TelnetD'
 $oldDirs = 'Pi1MHz TelnetD', 'Pi1MHz-TelnetD' | % { Join-Path $env:LOCALAPPDATA $_ }   # earlier kits' helper folders
 
+# Each font is installed as NAME-<hash of its contents>.ttf, and earlier versions (NAME.ttf, NAME-*.ttf) removed.
+# A new version under the old file name crashed Windows Terminal (1.25: divide by zero), which still had the old
+# file's measurements cached under that name.
+function Installed-Copies($f) {
+    $base = [IO.Path]::GetFileNameWithoutExtension($f)
+    @(Get-ChildItem $fontDir -Filter "$base*.ttf" -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -eq $f -or $_.Name -match ('^' + [regex]::Escape($base) + '-[0-9a-f]{8}\.ttf$') })
+}
+
 if ($Remove) {
     foreach ($f in $fonts.Keys) {
         Remove-ItemProperty -Path $fontKey -Name "$($fonts[$f]) Regular (TrueType)" -ErrorAction SilentlyContinue
-        Remove-Item (Join-Path $fontDir $f) -ErrorAction SilentlyContinue
+        Installed-Copies $f | Remove-Item -ErrorAction SilentlyContinue
     }
     Remove-Item $fragDir -Recurse -ErrorAction SilentlyContinue
     Remove-Item $oldDirs -Recurse -ErrorAction SilentlyContinue
@@ -36,24 +45,20 @@ Add-Type -Namespace TelnetD -Name Font -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
 '@
 New-Item -ItemType Directory -Force $fontDir | Out-Null
-# The same file? (.NET, not Get-FileHash: Windows PowerShell started from PowerShell 7 can fail to load it.)
-function Same-File($a, $b) {
-    if (-not (Test-Path $b)) { return $false }
-    return [Linq.Enumerable]::SequenceEqual([byte[]][IO.File]::ReadAllBytes($a), [byte[]][IO.File]::ReadAllBytes($b))
+# The hash with .NET, not Get-FileHash: Windows PowerShell started from PowerShell 7 can fail to load it.
+function Short-Hash($p) {
+    $h = [Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($p))
+    -join ($h[0..3] | ForEach-Object { $_.ToString('x2') })
 }
 foreach ($f in $fonts.Keys) {
     $src = Join-Path $kit $f
-    $dst = Join-Path $fontDir $f
-    if (-not (Same-File $src $dst)) {
-        if (Test-Path $dst) {                    # a new version: unload the old, once for each time it was loaded
-            for ($n = 0; $n -lt 32 -and [TelnetD.Font]::RemoveFontResourceW($dst) -ne 0; $n++) { }
-        }
-        try { Copy-Item $src $dst -Force }
-        catch {
-            Write-Host "$($fonts[$f]) is in use (an open Windows Terminal or PuTTY window): close them and run this again."
-            exit 1
-        }
+    $dst = Join-Path $fontDir ([IO.Path]::GetFileNameWithoutExtension($f) + '-' + (Short-Hash $src) + '.ttf')
+    foreach ($old in (Installed-Copies $f | Where-Object { $_.FullName -ne $dst })) {
+        # an earlier version: unloaded (once for each time it was loaded) and removed
+        for ($n = 0; $n -lt 32 -and [TelnetD.Font]::RemoveFontResourceW($old.FullName) -ne 0; $n++) { }
+        Remove-Item $old.FullName -ErrorAction SilentlyContinue
     }
+    if (-not (Test-Path $dst)) { Copy-Item $src $dst }
     New-ItemProperty -Path $fontKey -Name "$($fonts[$f]) Regular (TrueType)" -Value $dst -PropertyType String -Force | Out-Null
     [void][TelnetD.Font]::AddFontResourceW($dst)
     Write-Host "Font installed: $($fonts[$f])"
@@ -71,7 +76,7 @@ if (-not $wsl) { $frag = $frag.Replace('wsl.exe -e env TERM=xterm-bbc telnet', '
 $frag = $frag.Replace('telnet Pi1MHz', 'telnet ' + $TelnetHost).Replace('telnet.exe Pi1MHz', 'telnet.exe ' + $TelnetHost)
 New-Item -ItemType Directory -Force $fragDir | Out-Null
 Set-Content (Join-Path $fragDir 'telnetd.json') $frag -NoNewline
-Write-Host "Windows Terminal profiles added: BBC Micro MODE 7, MODE 0/3, MODE 1/4/6, MODE 2/5 (host $TelnetHost)"
+Write-Host "Windows Terminal profiles added: BBC Micro (every MODE) and BBC Micro MODE 7 (host $TelnetHost)"
 
 # The "BBC Micro" colour scheme into settings.json as well: Windows Terminal does not always take a scheme from a
 # fragment, and the profiles then fell back to its default colours (whose black is not the background's, which

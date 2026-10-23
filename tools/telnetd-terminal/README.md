@@ -57,7 +57,7 @@ On the console a mosaic is shown as the nearest block character instead.
 ## One window for every MODE (recommended)
 
 A program changes MODE as it runs, and a window can't change its font with it. So
-the "BBC Micro MODE 0/3" profiles tell TelnetD that the window has the "BBC Micro MOS"
+the "BBC Micro" profiles tell TelnetD that the window has the "BBC Micro MOS"
 font: they send the terminal type `xterm-bbc` (any terminal type with `bbc` in it
 does). TelnetD then draws every MODE in its own shape in that one 80 x 32 window.
 Every other window gets plain characters, so Windows' telnet client, or a terminal
@@ -72,11 +72,15 @@ The font holds each MODE's characters as pieces in Unicode's private-use area:
   mosaics, and separate top and bottom pieces for double height. So double height
   isn't double width, as it is with the terminal's own double-height lines.
 
-Use the "BBC Micro MODE 0/3" Windows Terminal profile with WSL's telnet, the
-"BBC Micro MODE 0-3" PuTTY session or `beeb-telnet -m 0` in a desktop terminal set to
-that font. Windows' own telnet client always says `ANSI`, so it gets plain characters.
-The window must be at least 80 x 32; TelnetD says so when you connect to a smaller
-one. MODE 7 uses the top 25 rows, with characters about a tenth wider than on the Beeb.
+Use the "BBC Micro" Windows Terminal profile with WSL's telnet, the "BBC Micro" PuTTY
+session or `beeb-telnet` in a desktop terminal set to that font. Windows' own telnet
+client always says `ANSI`, so it gets plain characters. The window must be at least
+80 x 32; TelnetD says so when you connect to a smaller one.
+
+MODE 7 has 25 rows and the other MODEs 32, and one window can't have both heights:
+MODE 7 uses the top 25 of the 32 rows, so its characters are shorter than on the Beeb.
+For MODE 7 exactly, use the "BBC Micro MODE 7" profile or session (or
+`beeb-telnet -m 7`): 40 x 25 in the teletext font, with the other MODEs in that font.
 
 Only send `xterm-bbc` from a window in that font: in any other font the pieces come
 out as empty boxes. Text copied out of the window is the pieces' codes, not letters.
@@ -94,22 +98,23 @@ on Windows, use either of these:
 Double-click `windows\install.cmd`. It installs, for the current user only (no
 administrator rights needed):
 
-- the four fonts;
+- the fonts (each as its name and a hash of its contents, so that a new version is a
+  new file to Windows: Windows Terminal crashed on a font replaced under its old name);
 - a Windows Terminal colour scheme called "BBC Micro";
-- four Windows Terminal profiles, one for each width: "BBC Micro MODE 7",
-  "BBC Micro MODE 0/3", "BBC Micro MODE 1/4/6" and "BBC Micro MODE 2/5". Each one
-  telnets to `Pi1MHz` with WSL's telnet if there is one, and with `telnet.exe` if not.
+- two Windows Terminal profiles: "BBC Micro" (every MODE in its own shape) and
+  "BBC Micro MODE 7" (MODE 7 exactly). Each telnets to `Pi1MHz` with WSL's telnet if
+  there is one, and with `telnet.exe` if not.
 
 If your Pi has another name, give it to the installer from a command prompt, and the
 profiles use it: `install.cmd my-pi-name` (or its IP address). Windows Terminal reads
-the profiles when it starts, so close all its windows first.
+the profiles and fonts when it starts, so close all its windows first, every one.
 
 Then do either of these:
 
 - choose one of the profiles from Windows Terminal's new-tab menu;
-- double-click `windows\BBC-Micro-telnet.cmd`. It opens a MODE 7 window. You can
-  give a host and a MODE: `BBC-Micro-telnet.cmd 192.168.1.50 0` opens the MODE 0
-  profile.
+- double-click `windows\BBC-Micro-telnet.cmd`. It opens the "BBC Micro" window.
+  You can give a host, and `7` for the MODE 7 one: `BBC-Micro-telnet.cmd 192.168.1.50 7`;
+- from a command prompt: `wt -w new -p "BBC Micro"` (or `-p "BBC Micro MODE 7"`).
 
 The profiles use 12.5-point fonts. Windows Terminal 1.25 ignores the window size it
 is given on its command line and opens every window at its default size (120 x 30 in
@@ -127,17 +132,18 @@ install, run `powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Remo
 ## PuTTY
 
 Install the fonts first with `windows\install.cmd`, or install the `.ttf` files by
-hand. Then double-click `putty\BBC-Micro-telnet.reg`. This adds four saved sessions,
-"BBC Micro MODE 7", "BBC Micro MODE 0-3", "BBC Micro MODE 1-4-6" and
-"BBC Micro MODE 2-5", with these settings:
+hand. Then double-click `putty\BBC-Micro-telnet.reg`. This adds two saved sessions,
+"BBC Micro" and "BBC Micro MODE 7" (and removes earlier kits' per-MODE ones), with
+these settings:
 
 - telnet to `Pi1MHz`, port 23;
-- that mode's window size and font, and the BBC's colours;
+- the window size and font ("BBC Micro": 80 x 32, BBC Micro MOS, terminal type
+  `xterm-bbc`; "BBC Micro MODE 7": 40 x 25, BBC Micro Teletext), and the BBC's colours;
 - UTF-8, needed for the pound sign and the teletext graphics;
 - function keys sent as `ESC [ n ~`, so F12 is BREAK.
 
 Load a session in PuTTY, change the Host Name if you need to, and save it again.
-`windows\BBC-Micro-putty.cmd [host] [mode]` opens a session in one double-click.
+`windows\BBC-Micro-putty.cmd [host] [7]` opens a session in one double-click.
 
 ## Debian (bookworm and trixie)
 
@@ -150,20 +156,23 @@ The installer:
 - installs the TrueType fonts in `~/.local/share/fonts`;
 - installs the `beeb-telnet` command in `~/.local/bin`.
 
-To connect, run `beeb-telnet`, or `beeb-telnet -m MODE host`. What it does depends
-on where you run it:
+To connect, run `beeb-telnet [host]` for every MODE in its own shape, or
+`beeb-telnet -m 7 [host]` for MODE 7 exactly. What it does depends on where you run it:
 
-- **On the Linux console** (a text login, not a desktop): it loads that MODE's
+- **On the Linux console** (a text login, not a desktop): the console fonts have no
+  pieces, so it uses one MODE's font, `-m MODE` (MODE 0 if none is given). It loads that
   console font and the BBC's eight colours for the session. When telnet ends, it
   puts back your own font and colours. The console must be big enough for the
   mode in that font. For example, MODE 0 needs 80 x 32, which an 8 x 16 font gives
   on a 640 x 512 or larger framebuffer.
-- **In a desktop terminal** (GNOME Terminal, Konsole, xterm and so on): it just runs
-  telnet, and says which font and window size to choose in the terminal's own
-  preferences. In xterm you can do it all on the command line:
-  `xterm -fa 'BBC Micro Teletext' -fs 12 -geometry 40x25 -e telnet Pi1MHz`.
+- **In a desktop terminal** (GNOME Terminal, Konsole, xterm and so on): it runs telnet
+  (with terminal type `xterm-bbc` unless `-m 7`), and says which font and window size
+  to choose in the terminal's own preferences. In xterm you can do it all on the
+  command line: `xterm -fa 'BBC Micro MOS' -fs 12 -geometry 80x32 -e env TERM=xterm-bbc telnet Pi1MHz`.
 
 To remove everything it installed, run `sh linux/install.sh --remove`.
 
-Character mode and line mode (`mode line` in Debian's telnet) both work the same
-in every one of these.
+Character mode and line mode (`mode line` in Debian's telnet, also in WSL) both work
+the same in every one of these, with and without the BBC font: in line mode the
+client shows what you type itself, and TelnetD draws the screen again when you press
+RETURN, so the line ends up in the Beeb's place and shape.
