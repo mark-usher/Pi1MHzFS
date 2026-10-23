@@ -65,6 +65,21 @@ $frag = $frag.Replace('telnet Pi1MHz', 'telnet ' + $TelnetHost).Replace('telnet.
 New-Item -ItemType Directory -Force $fragDir | Out-Null
 Set-Content (Join-Path $fragDir 'telnetd.json') $frag -NoNewline
 Write-Host "Windows Terminal profiles added: BBC Micro MODE 7, MODE 0/3, MODE 1/4/6, MODE 2/5 (host $TelnetHost)"
+
+# The "BBC Micro" colour scheme into settings.json as well: Windows Terminal does not always take a scheme from a
+# fragment, and the profiles then fell back to its default colours (whose black is not the background's, which
+# left the cells the Beeb clears showing).  A copy of settings.json is kept beside it first.
+$wtSettings = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal*\LocalState\settings.json') -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($wtSettings) {
+    $raw = Get-Content $wtSettings.FullName -Raw
+    $json = ($raw -split "`n" | Where-Object { $_ -notmatch '^\s*//' }) -join "`n" | ConvertFrom-Json
+    $scheme = (Get-Content (Join-Path $here 'telnetd-fragment.json') -Raw | ConvertFrom-Json).schemes[0]
+    $others = @($json.schemes | Where-Object { $_.name -ne $scheme.name })
+    Copy-Item $wtSettings.FullName ($wtSettings.FullName + '.before-bbc-micro') -Force
+    $json.schemes = @($others) + $scheme
+    $json | ConvertTo-Json -Depth 32 | Set-Content $wtSettings.FullName -Encoding UTF8
+    Write-Host 'Colour scheme "BBC Micro" added to Windows Terminal''s settings.'
+}
 if (-not $wsl) {
     Write-Host ''
     Write-Host "WSL has no telnet client, so the profiles use Windows' own telnet.exe, which cannot show the pound sign"

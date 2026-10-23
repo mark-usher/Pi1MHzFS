@@ -33,6 +33,8 @@
      telnetd_password=    empty: the password is then just RETURN); up to 64 characters each
      telnetd_ansi=1       0: the Beeb's bytes as they are, no ANSI
      telnetd_utf8=1       the pound sign as UTF-8; 0: Latin-1
+     telnetd_palette=1    set the terminal's colours to the BBC's at connect (OSC 4/10/11/12);
+                          0: leave the terminal's own colour scheme
      telnetd_separated=1  MODE 7's separated graphics as Unicode 16's separated sextants;
                           0: as contiguous ones (for a terminal font without them)
      telnetd_login=1      0: no login at all, open to the network
@@ -92,6 +94,16 @@ static struct tcp_pcb *g_raw_listener;         /* telnetd_raw_port: sessions the
 static uint16_t        g_raw_port;
 static bool            g_sess_rawport;         /* this session came on the raw port: no telnet at all */
 static bool            g_tek = true;          /* telnetd_tek: graphics to an xterm's Tek window */
+static bool            g_palette = true;      /* telnetd_palette: the terminal's colours set to the BBC's */
+/* The BBC's eight colours, normal and bright alike, for the terminal's palette (OSC 4) and its own text,
+   background and cursor (OSC 10, 11, 12): the terminal's black is then the Beeb's, so cells the Beeb
+   clears match the background, whatever colour scheme the terminal's profile has.  Terminals that do not
+   know OSC ignore it. */
+static const char      k_palette[] =
+   "\x1b]4;0;rgb:00/00/00;1;rgb:ff/00/00;2;rgb:00/ff/00;3;rgb:ff/ff/00;4;rgb:00/00/ff;5;rgb:ff/00/ff;"
+   "6;rgb:00/ff/ff;7;rgb:ff/ff/ff;8;rgb:00/00/00;9;rgb:ff/00/00;10;rgb:00/ff/00;11;rgb:ff/ff/00;"
+   "12;rgb:00/00/ff;13;rgb:ff/00/ff;14;rgb:00/ff/ff;15;rgb:ff/ff/ff\x07"
+   "\x1b]10;rgb:ff/ff/ff\x07\x1b]11;rgb:00/00/00\x07\x1b]12;rgb:ff/ff/ff\x07";
 static bool            g_debug;               /* telnetd_debug=1: the diagnostics on the status page */
 static bool            g_utf8 = true;
 static bool            g_copy = true;         /* show the copy cursor */
@@ -406,6 +418,8 @@ static void connect_start(void)
    g_conn_us = g_dot_us = Pi1MHz_now_us;
    g_warn_until = 0u;
    g_warned = false;
+   if (g_palette && g_ansi)
+      o_str(k_palette);
    o_str("\r\n");
    o_str(td_name());
    o_str(" telnet - connecting");
@@ -1545,6 +1559,7 @@ void telnetd_init(void)
    g_utf8 = cfg_flag("telnetd_utf8", true);
    g_copy = cfg_flag("telnetd_copycursor", true);
    g_tek = cfg_flag("telnetd_tek", true);
+   g_palette = cfg_flag("telnetd_palette", true);
    g_debug = cfg_flag("telnetd_debug", false);
    tnd_out_reset(&g_out, g_utf8);
    g_out.sep_glyphs = cfg_flag("telnetd_separated", true);

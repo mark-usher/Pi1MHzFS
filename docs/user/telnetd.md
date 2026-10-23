@@ -636,6 +636,7 @@ nowhere else, and keep telnet to a network you trust.
 | `telnetd_raw_port` | (none) | A second port for teletype mode with no telnet (PuTTY's Raw, `nc`): bytes as they are, both ways. |
 | `telnetd_ansi` | `1` | `0` sends the Beeb's output exactly as it is, with no ANSI. For a program that does its own VDU handling. |
 | `telnetd_utf8` | `1` | The pound sign as UTF-8; `0` sends it as Latin-1. |
+| `telnetd_palette` | `1` | Sets the terminal's colours to the BBC's when a session starts (OSC 4, 10, 11 and 12), whatever colour scheme the terminal has: the eight colours at full strength, and black the same as the background, so cells the Beeb clears don't show. `0` leaves the terminal's colours alone. The terminal keeps them after the session; `tput reset` (Linux) or a new window puts yours back. |
 | `telnetd_separated` | `1` | MODE 7's separated graphics as Unicode 16's separated sextants; `0` sends them as contiguous ones, for a terminal font that doesn't have them. |
 | `telnetd_mode` | `7` | The Beeb's screen mode (0-7) until it sends a `MODE`. Its size cannot be read, and the daemon needs it to follow the text. |
 | `telnetd_copycursor` | `1` | `0` does not mark the copy cursor in the terminal. |
