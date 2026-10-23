@@ -1,8 +1,8 @@
 # install.ps1 - the BBC Micro look for a telnet session to TelnetD, for the current Windows user (no administrator
 # rights): the four BBC Micro fonts (one for each width of the Beeb's screen: MODE 7, MODE 0/3, MODE 1/4/6, MODE 2/5),
 # and a Windows Terminal profile for each with the BBC's colours.
-# Run by install.cmd.  Remove with: install.ps1 -Remove
-param([switch]$Remove)
+# Run by install.cmd [host] (the Pi's name or address for the profiles; Pi1MHz if none).  Remove with: install.ps1 -Remove
+param([string]$TelnetHost = 'Pi1MHz', [switch]$Remove)
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $kit = Split-Path -Parent $here
@@ -61,9 +61,10 @@ $wsl = $false
 try { & wsl.exe -e sh -c 'command -v telnet' *> $null; $wsl = ($LASTEXITCODE -eq 0) } catch { }
 $frag = Get-Content (Join-Path $here 'telnetd-fragment.json') -Raw
 if (-not $wsl) { $frag = $frag.Replace('wsl.exe -e telnet', 'telnet.exe') }
+$frag = $frag.Replace('telnet Pi1MHz', 'telnet ' + $TelnetHost).Replace('telnet.exe Pi1MHz', 'telnet.exe ' + $TelnetHost)
 New-Item -ItemType Directory -Force $fragDir | Out-Null
 Set-Content (Join-Path $fragDir 'telnetd.json') $frag -NoNewline
-Write-Host 'Windows Terminal profiles added: BBC Micro MODE 7, MODE 0/3, MODE 1/4/6, MODE 2/5'
+Write-Host "Windows Terminal profiles added: BBC Micro MODE 7, MODE 0/3, MODE 1/4/6, MODE 2/5 (host $TelnetHost)"
 if (-not $wsl) {
     Write-Host ''
     Write-Host "WSL has no telnet client, so the profiles use Windows' own telnet.exe, which cannot show the pound sign"

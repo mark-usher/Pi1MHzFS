@@ -73,6 +73,10 @@ administrator rights needed):
   "BBC Micro MODE 0/3", "BBC Micro MODE 1/4/6" and "BBC Micro MODE 2/5". Each one
   telnets to `Pi1MHz` with WSL's telnet if there is one, and with `telnet.exe` if not.
 
+If your Pi has another name, give it to the installer from a command prompt, and the
+profiles use it: `install.cmd my-pi-name` (or its IP address). Windows Terminal reads
+the profiles when it starts, so close all its windows first.
+
 Then do either of these:
 
 - choose one of the profiles from Windows Terminal's new-tab menu;
