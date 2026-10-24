@@ -1603,6 +1603,28 @@ static void test_bbcfont(void)
    CHECK(strstr(out, "\xee\x88\x84\xee\x88\x85\xee\x88\x86\xee\x88\x87") != NULL, "MODE 2: 'A' is its four quarters, U+E204-E207");
    BBC("\x16\x01", "AB\x7f");
    CHECK(strstr(out, "\x08\x08\xee\xa5\x80\xee\xa5\x81\x08\x08") != NULL, "MODE 1: DELETE is two cells back, a blank of two halves, back");
+
+   /* Characters a program defines (VDU 23): 128-255 blank until defined, never teletext colours, and a
+      defined one drawn as blocks of its bitmap. */
+#define PLN(mode, lit) (tnd_out_reset(&s, true), feed_out(&s, mode, 2, out, sizeof out), \
+                        feed_out(&s, lit, sizeof(lit) - 1, out, sizeof out))
+   PLN("\x16\x01", "\x81" "AB");
+   CHECK(strstr(out, "\x1b[31m") == NULL && strstr(out, " AB") != NULL, "MODE 1: CHR$129 is a blank character, no red");
+   PLN("\x16\x01", "\xc1");
+   CHECK(strchr(out, 'A') == NULL, "MODE 1: CHR$193 undefined is blank, not an A");
+   static const char top[] = "\x17\xe0\xff\xff\xff\xff" "\x00\x00\x00\x00" "\xe0";   /* the top half lit */
+   PLN("\x16\x00", top);
+   CHECK(strstr(out, "\xe2\x96\x80") != NULL, "MODE 0: a defined character's top half is U+2580");
+   BBC("\x16\x00", top);
+   CHECK(strstr(out, "\xee\xa8\x8f") != NULL, "MODE 0, BBC font: its top half is blocks 0-3, U+EA0F");
+   BBC("\x16\x01", top);
+   CHECK(strstr(out, "\xee\xa8\x8f\xee\xa8\x8f") != NULL, "MODE 1, BBC font: two cells of U+EA0F");
+   static const char line[] = "\x17\xe1\x80\x80\x80\x80\x80\x80\x80\x80" "\xe1";   /* one dot wide, at the left */
+   BBC("\x16\x00", line);
+   CHECK(strstr(out, "\xee\xa9\x95") != NULL, "MODE 0, BBC font: a line one dot wide still shows (U+EA55)");
+   BBC("\x16\x02", line);
+   CHECK(strstr(out, "\xee\xa9\x95\xee\xa8\x80\xee\xa8\x80\xee\xa8\x80") != NULL, "MODE 2, BBC font: in the first of four cells only");
+#undef PLN
    BBC("\x16\x07", "A");
    CHECK(strstr(out, "\xee\x8e\x82\xee\x8e\x83") != NULL, "MODE 7: 'A' is the teletext font's two halves, U+E382 U+E383");
    BBC("\x16\x07", "\x8d" "A\r\n\x8d" "A");

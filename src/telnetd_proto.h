@@ -151,7 +151,7 @@ size_t tnd_in_tick(tnd_in_t *s, uint32_t now_us, uint8_t keys[TND_IN_KEYS]);
 typedef struct {
    uint8_t code;                /* the VDU code whose parameters are being collected, 0 = none */
    uint8_t got;                 /* parameters collected so far */
-   uint8_t p[5];                /* the ones the translator uses */
+   uint8_t p[9];                /* the ones the translator uses (VDU 23's character and its 8 rows) */
    bool    disabled;            /* VDU 21 seen: everything is ignored until VDU 6 */
    bool    coloured;            /* a colour was set: reset it at the end of the line */
    bool    utf8;                /* the pound sign as UTF-8 (else Latin-1) */
@@ -160,6 +160,10 @@ typedef struct {
                                    pieces, 80 columns wide: each Beeb character is drawn as 80 / cols pieces of
                                    it (halves in 40 columns and MODE 7, quarters in 20), each MODE in its own
                                    shape, and teletext double height as top and bottom pieces, not DECDHL */
+   /* Characters a program defined (VDU 23,c, c 32-255; with a second processor the MOS keeps each one's
+      own, and 128-255 are blank until defined): drawn as blocks of their bitmap. */
+   uint8_t  udg[224][8];
+   uint8_t  udg_on[28];         /* bit c - 32: character c has been defined */
 
    /* a model of the Beeb's text screen: see telnetd_proto.c */
    bool     sync;               /* the cursor position is known (a CLS, MODE, TAB ... was seen) */

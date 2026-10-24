@@ -66,6 +66,20 @@ foreach ($f in $fonts.Keys) {
 $r = [IntPtr]::Zero
 [void][TelnetD.Font]::SendMessageTimeoutW([IntPtr]0xffff, 0x001D, [IntPtr]::Zero, [IntPtr]::Zero, 2, 1000, [ref]$r)
 
+# Windows' font cache keeps a font's old version under its name, and Windows Terminal crashes on it (closes at
+# once on the profile). Run as administrator, the installer clears the cache; otherwise sign out and in again.
+$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($admin) {
+    Stop-Service FontCache -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $env:WINDIR 'ServiceProfiles\LocalService\AppData\Local\FontCache\*') -Force -Recurse -ErrorAction SilentlyContinue
+    Start-Service FontCache -ErrorAction SilentlyContinue
+    Write-Host 'Windows font cache cleared.'
+} else {
+    Write-Host 'If you had an earlier version of these fonts: sign out and in again (or run this as administrator),'
+    Write-Host 'or Windows Terminal may close at once on the BBC Micro profiles.'
+}
+
 # The profiles: Windows Terminal picks up "fragments" from this folder by itself.  They run WSL's telnet when WSL has
 # one (it shows UTF-8: the pound sign and the teletext graphics), else Windows' telnet.exe.
 Remove-Item $oldDirs -Recurse -ErrorAction SilentlyContinue

@@ -907,10 +907,64 @@ static size_t put_attr(const tnd_out_t *s, uint8_t *dst, uint8_t at)
    return n;
 }
 
-/* A stored cell character as the terminal wants it: 96 is the Beeb's pound.  With the BBC font in 40 or
-   20 columns, its halves or quarters. */
+/* A character a program defined (VDU 23), as blocks of its 8 x 8 bitmap, each lit when a quarter or more of
+   its dots are (so a line one dot wide still shows).  With the BBC font each of the character's kf cells is
+   2 x 4 blocks, the font's piece U+EA00 + v (bit 0 the top left block ... 7 the bottom right): 2 x 4 for the
+   character in MODE 0, 4 x 4 in MODE 1, 8 x 4 in MODE 2.  Without it, 2 x 2: Unicode's quadrants. */
+#define PUA_UDG 0xEA00u
+
+static bool udg_def(const tnd_out_t *s, uint8_t ch)
+{
+   return ch >= 32u && (s->udg_on[(ch - 32u) >> 3] & (1u << ((ch - 32u) & 7u))) != 0u;
+}
+
+static unsigned udg_dots(const uint8_t *d, unsigned x0, unsigned w, unsigned y0, unsigned h)
+{
+   unsigned n = 0u;
+   for (unsigned y = y0; y < y0 + h; y++)
+      for (unsigned x = x0; x < x0 + w; x++)
+         n += ((unsigned)d[y] >> (7u - x)) & 1u;
+   return n;
+}
+
+static size_t put_udg(const tnd_out_t *s, uint8_t *dst, uint8_t ch)
+{
+   static const uint16_t quad[16] = { 0x20u, 0x2598u, 0x259Du, 0x2580u, 0x2596u, 0x258Cu, 0x259Eu, 0x259Bu,
+                                      0x2597u, 0x259Au, 0x2590u, 0x259Cu, 0x2584u, 0x2599u, 0x259Fu, 0x2588u };
+   const uint8_t *d = s->udg[ch - 32u];
+   size_t n = 0u;
+   if (s->bbcfont) {
+      unsigned k = kf(s), w = 4u / k;              /* dots across a block: 4, 2 or 1 */
+      for (unsigned i = 0u; i < k; i++) {
+         unsigned v = 0u;
+         for (unsigned r = 0u; r < 4u; r++)
+            for (unsigned c = 0u; c < 2u; c++)
+               if (udg_dots(d, i * (8u / k) + c * w, w, 2u * r, 2u) * 4u >= 2u * w)
+                  v |= 1u << (2u * r + c);
+         n += put_pua(dst + n, PUA_UDG + v);
+      }
+      return n;
+   }
+   unsigned q = 0u;
+   for (unsigned r = 0u; r < 2u; r++)
+      for (unsigned c = 0u; c < 2u; c++)
+         if (udg_dots(d, 4u * c, 4u, 4u * r, 4u) * 4u >= 16u)
+            q |= 1u << (2u * r + c);
+   if (q == 0u || !s->utf8) {
+      dst[0] = q == 0u ? ' ' : '#';
+      return 1u;
+   }
+   return put_pua(dst, quad[q]);
+}
+
+/* A stored cell character as the terminal wants it: 96 is the Beeb's pound; 128-255, until a program
+   defines them, blank.  With the BBC font in 40 or 20 columns, its halves or quarters. */
 static size_t put_glyph(const tnd_out_t *s, uint8_t *dst, uint8_t ch)
 {
+   if (udg_def(s, ch))
+      return put_udg(s, dst, ch);
+   if (ch >= 127u)
+      ch = ' ';
    unsigned k = kf(s);
    if (k != 1u) {
       size_t n = 0u;
@@ -1684,7 +1738,10 @@ static size_t finish_code(tnd_out_t *s, uint8_t dst[TND_OUT_MAX])
       s->oy = (int16_t)(s->p[2] | (s->p[3] << 8));
       break;
    case 23:                                     /* VDU 23,1,n: the cursor off (0) or on */
-      if (s->p[0] == 1u) {
+      if (s->p[0] >= 32u) {                     /* VDU 23,c,8 rows: character c defined */
+         memcpy(s->udg[s->p[0] - 32u], &s->p[1], 8u);
+         s->udg_on[(s->p[0] - 32u) >> 3] |= (uint8_t)(1u << ((s->p[0] - 32u) & 7u));
+      } else if (s->p[0] == 1u) {
          s->curoff = (s->p[1] & 1u) == 0u;
          n = put_str(dst, s->curoff ? "\x1b[?25l" : "\x1b[?25h");
       }
@@ -1729,8 +1786,13 @@ static size_t glyph(tnd_out_t *s, uint8_t c, uint8_t *dst, uint8_t *stored, int 
       *stored = c;
       return put_glyph(s, dst, c);
    }
-   /* 128 and up.  Mode 7: 0x81-0x87 and 0x91-0x97 are colour codes, shown as a
-      space; the other controls are spaces too.  From 0xA0 the teletext chip
+   /* MODE 0-6: 128-255 are characters a program defines (VDU 23), not teletext codes: no colour. */
+   if (!s->tele) {
+      *stored = (c == 127u) ? ' ' : c;
+      return put_glyph(s, dst, *stored);
+   }
+   /* 128 and up in MODE 7 (where the cursor's place is not known yet).  0x81-0x87 and 0x91-0x97 are
+      colour codes, shown as a space; the other controls are spaces too.  From 0xA0 the teletext chip
       ignores bit 7 and shows the character. */
    if (c < 0xA0u) {
       uint8_t colour = (uint8_t)(c & 0x0Fu);   /* 0x81-0x87 alpha, 0x91-0x97 graphics */

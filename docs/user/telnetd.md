@@ -437,6 +437,17 @@ mode; PuTTY's "local line editing") send ESC and F12 only with the line. `send b
   Windows telnet reports its size only when it connects, so after resizing it press
   F11 (the message says so only to Windows telnet).
 
+- **Characters a program defines (VDU 23) are drawn as blocks** of their 8 x 8
+  bitmap, a block lit where a quarter or more of its dots are: with the BBC font
+  2 x 4 blocks in MODE 0 and 3, 4 x 4 in MODE 1, 4 and 6, 8 x 4 in MODE 2 and 5
+  (the font's pieces U+EA00-EAFF); without it 2 x 2, Unicode's quadrant blocks.
+  Codes 128-255 in MODE 0-6 are such characters, blank until a program defines
+  them, as on the Beeb (never MODE 7's colour codes there). The daemon keeps each
+  character's own definition, as the MOS does with a second processor; a Beeb
+  without one shares a definition between 128, 160, 192 and 224 until `*FX20`.
+  A redefined character already on the screen keeps its old shape on the Beeb
+  but takes the new one when the terminal is drawn again.
+
 - **ESC and Ctrl-C are the Beeb's ESCAPE key**, with the Beeb's own settings, as
   the keyboard's ESCAPE goes through the MOS (OSBYTE 153): it raises ESCAPE, so it
   stops a running BASIC program (error 17, "Escape"), unless the program has said
