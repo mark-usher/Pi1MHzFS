@@ -430,6 +430,175 @@ Clients without LINEMODE that collect lines themselves (Windows telnet has no li
 mode; PuTTY's "local line editing") send ESC and F12 only with the line. `send brk`
 (Windows telnet, PuTTY's "Special Command") works in any mode.
 
+## Plain line mode: nc and scripts
+
+A telnet client (telnet, PuTTY, Windows telnet) gets the Beeb's screen, as described
+above. A client that does not speak telnet gets **plain line mode** instead: it sends
+whole lines, and gets back only what the Beeb printed in answer, as plain text, the
+way a shell behaves over `nc`:
+
+```
+$ nc 192.168.1.20 23
+PRINT 2+2
+         4
+>*HELP
+
+OS 1.20
+>
+```
+
+You do not need to set anything. The daemon chooses the mode for each connection
+from what the client does after the telnet negotiation it sends first:
+
+- a client that answers it (every telnet client, at once) gets screen mode - also a
+  telnet client in its own line mode (Linux telnet's `mode line`, above), which keeps
+  the screen;
+- a client that sends data before any answer (`nc`, `printf ... | nc`, a script on a
+  raw socket), or says nothing for three quarters of a second, gets plain line mode.
+
+The login prompt and the Beeb's output wait until the mode is chosen. To fix the mode,
+set `telnetd_linemode=on` (always plain line mode, and nothing is negotiated) or
+`telnetd_linemode=off` (always screen mode, exactly as before) in `Pi1MHz.cfg`.
+
+In plain line mode:
+
+- **Each line is typed on the Beeb with RETURN** (CR LF, CR or LF all end a line).
+  The Beeb's echo of the line is taken out of what comes back, since your side has
+  already shown it. If what the Beeb prints stops matching the line, it is passed
+  on as it is.
+- **What comes back is text.** Cursor moves, TAB(x,y), colours, MODE, windows,
+  graphics and VDU 23 are dropped, along with their parameter bytes. Teletext
+  control codes become spaces, as on the screen. New lines arrive as CR LF. The
+  bell and the pound sign are kept. DELETE comes back as backspace, space,
+  backspace.
+- **Ctrl-C is ESCAPE**, as in screen mode. With `nc` in a terminal, Ctrl-C stops
+  `nc` itself. Type Ctrl-V Ctrl-C and then RETURN instead: the Ctrl-C goes as
+  ESCAPE and the RETURN gives an empty line.
+- **The end of the output** is marked with telnet's Go Ahead (`IAC GA`) once the
+  Beeb has printed nothing for 0.3 s and has taken every key, so a script can wait
+  for it. The daemon sends it only to a client that speaks telnet and has not
+  agreed to suppress Go Ahead: a raw client, such as `nc`, never gets it, because it
+  would show as junk. It gets a NUL now and then instead of telnet's keepalive.
+- **The login** is the same, but the daemon does not echo what you type: your own
+  side shows it - the password too.
+- **The negotiation shows as junk on `nc`** in automatic mode: fifteen bytes at the
+  start, before the greeting. `telnetd_linemode=on` sends none.
+
+Limitations:
+
+- **Full-screen programs** (editors, games, anything drawn with TAB(x,y)) make no
+  sense as lines. Use a terminal.
+- **GET and INKEY wait for RETURN**, because nothing is sent until the line ends.
+  The rest of the line follows the key the program took. A program that reads a key
+  and prints that same key followed by a new line looks exactly like an echo, so
+  that output is lost.
+- **No teletext colours, graphics, F11 redraw or copy cursor.** These are screen
+  and shell mode features. A terminal gets shell mode instead (below).
+
+## Shell mode: line editing on the Pi
+
+A terminal can also have the line mode way of working, with the Pi editing the line
+the way a Linux shell does. Press **Ctrl-\ then m** in a terminal session to switch
+between screen mode and shell mode. To start every terminal session in shell mode,
+set `telnetd_linemode=shell`.
+
+```
+>PRINT 2+2
+         4
+>
+```
+
+You type into an editor on the Pi, after the Beeb's prompt, and the whole line goes
+to the Beeb when you press RETURN. You see the line once, as you typed it, and then
+the Beeb's answer.
+
+| Keys | Does |
+|---|---|
+| Left, Right, Ctrl-B, Ctrl-F | move along the line |
+| Home, End, Ctrl-A, Ctrl-E | start, end of the line |
+| Backspace; Delete, Ctrl-D | delete before; under the cursor (Windows telnet sends Backspace's code for Delete too, so there Delete deletes before) |
+| Ctrl-K, Ctrl-U, Ctrl-W | delete to the end, to the start, the word before |
+| Up, Down | step through the lines typed this session (16, no repeats) |
+| Ctrl-R | the latest earlier line with what you have typed in it; again for older |
+| Ctrl-L | draw the line again |
+| Ctrl-V and two hex digits | that byte, e.g. Ctrl-V 8 1 gives &81, a red teletext code |
+| Ctrl-C, ESC | ESCAPE, and the line is dropped |
+
+Function keys go to the Beeb as `*KEY` strings, as in screen mode. The Beeb's COPY
+key editing is not offered in shell mode: use the history and your terminal's copy
+and paste instead. Screen mode keeps COPY.
+
+**How keys reach a program that reads single keys.** The editor only takes your keys
+while the Beeb is at a line prompt. To find out, the first key you type at a quiet
+Beeb goes straight to it. If the Beeb echoes that key, it is reading a line (the
+BASIC prompt, `*` commands, INPUT), and the editor takes over: it removes the key
+from the Beeb's line again and puts it in its own. If the Beeb does not echo the key
+(GET and INKEY do not), a program read it, and your keys go straight to the Beeb
+until you stop typing for half a second. A Beeb that is busy printing gets keys
+straight away too. In practice: typing at a prompt edits on the Pi, and keys for a
+running program reach it at once.
+
+The limits of this rule:
+
+- At a quiet Beeb, the arrow keys, Home, End and RETURN open the editor, even if a
+  program is waiting for them with GET or INKEY. For such a program (a menu, a game),
+  switch to screen mode with Ctrl-\ m.
+- A program that reads a key and prints that same key followed by a new line looks
+  exactly like a line prompt. The editor takes over after that key.
+- A line wider than your terminal redraws untidily when the Beeb prints during
+  typing.
+- With the auto-start ROM (build 13 or later) Ctrl-V can type any code from &80: it
+  goes to the program as it is. Without it, &80-&8A arrive as SHIFT with a function
+  key and &90-&9A as CTRL with one (the MOS's default settings), and the codes no key
+  gives (&8B-&8F, &9B-&9F, &A0-&CF) are refused with a bell: use `CHR$` in the program
+  instead.
+
+## The hot key: Ctrl-\
+
+In a terminal session (screen or shell mode), Ctrl-\ is a prefix. The next key is a
+command for the daemon:
+
+| Ctrl-\ then | Does |
+|---|---|
+| m | switch screen mode and shell mode. Screen mode is drawn again from the daemon's picture; shell mode starts on a new line with the Beeb's line (its prompt) again |
+| t | switch teletext codes between rendered and markers (below) |
+| Ctrl-\ | send one Ctrl-\ (code 28) to the Beeb |
+
+Any other key after Ctrl-\ is dropped. Ctrl-\ was chosen because no telnet client
+and no other daemon key uses it, and the BBC key it shadows is still available by
+pressing Ctrl-\ twice. With `telnetd_linemode=off`, Ctrl-\ is an ordinary key, as
+before. Plain line mode (`nc`) and teletype mode have no hot key.
+
+## Teletext codes in shell mode
+
+In MODE 7, a program's teletext control codes (&80-&9F) can be shown two ways in
+shell mode:
+
+- **Rendered** (the default, `telnetd_teletext=rendered`): the codes take effect as
+  on the Beeb. Text takes on their colours, graphics show as sextant block characters
+  (as in screen mode), double height and flash as far as a terminal can, and each
+  code's own cell is a space. Colours never run on past the end of a line, or past
+  the Beeb's 40th column.
+- **Markers** (`telnetd_teletext=markers`, or Ctrl-\ t): each code is shown in its own
+  column, so a `LIST` stays lined up and you can see where codes are. A colour code
+  is a block in its colour: solid for text colours, shaded for graphics colours. The
+  others are reversed letters:
+
+  | Marker | Code | Marker | Code |
+  |---|---|---|---|
+  | F | &88 flash | C | &98 conceal |
+  | S | &89 steady | c | &99 contiguous graphics |
+  | 1 | &8C normal height | s | &9A separated graphics |
+  | 2 | &8D double height | b | &9C black background |
+  | [ ] | &8B, &8A box | B | &9D new background |
+  | K, k | &80, &90 black | H, R | &9E hold, &9F release graphics |
+
+  Concealed text is shown, and graphics characters after a graphics code are sextants.
+
+The shell's edit line always shows codes you type with Ctrl-V as markers, because
+there is nothing there for them to colour. `nc` and other raw clients (plain line mode)
+always get spaces, with no escape codes.
+
 ## Things to know
 
 - **Make the terminal at least as big as the Beeb's screen**: 80 columns by 32
@@ -675,6 +844,8 @@ nowhere else, and keep telnet to a network you trust.
 | `telnetd_mode` | `7` | The Beeb's screen mode (0-7) until it sends a `MODE`. Its size cannot be read, and the daemon needs it to follow the text. |
 | `telnetd_copycursor` | `1` | `0` does not mark the copy cursor in the terminal. |
 | `telnetd_tek` | `1` | Draw the Beeb's graphics in xterm's Tektronix window when the terminal says it is xterm; `0`: never. |
+| `telnetd_linemode` | `auto` | Screen or plain line mode for each connection, from what the client does: a telnet client gets screen mode, a client that does not answer telnet (`nc`) plain line mode. `shell`: the same, but a terminal starts in shell mode. `on`: always plain line mode, nothing negotiated (clean for `nc`). `off`: always screen mode, and Ctrl-\ is an ordinary key. |
+| `telnetd_teletext` | `rendered` | Teletext codes in shell mode: `rendered` (colours and graphics) or `markers` (each code shown in its column). Ctrl-\ t switches. |
 | `telnetd_debug` | `0` | `1` shows TelnetD's diagnostics on the status page (keys waiting, the MODE it follows and why it last changed, the TCP state). Without it the status shows the port, the sessions and, only when it happens, BBC NOT TAKING KEYS. |
 
 `/status` on the web interface has a **Telnetd** row (the port, whether a

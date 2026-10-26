@@ -892,3 +892,55 @@ unchanged; the Pi side only.
   `probe_esc.py` (*FX229, *FX200, *FX220, an escape event handler in host memory),
   `probe_brkmod.py` (SHIFT-F12, CTRL-F12; it leaves the bench in the DFS's boot, so it
   runs last and is followed by a power cycle).
+
+## 17. Plain line mode and shell mode (port of telnetd-linemode, 2026-10-26)
+
+**STATUS: on the bench (Model B with a 6502 second processor, the daemon on upstream
+master with the font mode work), host-tested (803,961 protocol checks, 62 session
+checks).**
+
+The branch `telnetd-linemode` (14 Oct, `fa67410..e4da19a4`, never pushed) built line
+mode and shell mode on the daemon as it was then, before NAWS, TTYPE, the login, the
+ROM's key-taken reports and PR #45's client line mode. It was ported, not merged:
+`telnetd_proto.c`'s line translator (`tnd_line_*`), shell editor (`tnd_shell_*`), hot
+key and markers came over nearly as they were; `telnetd.c`'s session half was written
+again on today's daemon, then put on upstream master (dp111's rework after PR #45:
+`S_CONNECTING`, `g_scan`, `serial_redirect_beeb`).
+
+### What changed from the old design
+
+- **Who gets line mode.** The old rule gave line mode to any client that refused the
+  server's echo (`DONT ECHO`, `DONT SGA`). Since PR #45 Linux telnet's own line mode
+  (`mode line`: `DONT ECHO` and real LINEMODE) keeps the screen, with ESC, F12 and
+  Page Down sent at once and the screen drawn again at RETURN. So `tnd_decide` now
+  reads only whether the client speaks telnet: any telnet command is a terminal
+  (screen mode, or shell mode by the setting); data before any, or nothing for
+  `TND_DECIDE_US` (750 ms), is plain line mode. The login prompt and the Beeb's
+  output wait for the decision.
+- **Bytes above 127.** They reach the Beeb behind `TND_KEY_LIT` (ROM build 13's
+  LITKEY). The editor takes the pair as one character, sends it the same way, and
+  Ctrl-V can insert any code from &80 when the ROM takes it so (`tnd_key_for_char`
+  remains for a ROM without it). Home and Delete are `0xF7`/`0xF6`: `0xFC` is
+  SHIFT's now.
+- **The model follows in every mode** (`g_ansi_cfg`, not `g_ansi`), so Ctrl-\ m draws
+  the screen from it; outside screen mode `g_ansi` is false, which keeps the screen
+  reads, the copy cursor and Tek out.
+- **Shell mode starts after the Beeb's prompt**: the switch shows the Beeb's line
+  again (as teletype mode does), and the edit line follows it.
+- **The first screen read waits for a pause in the typing** (`g_scan_wait`), only
+  that one: a filing system's output, a silent key or a return from teletype mode
+  read at once.
+
+### Results on the bench
+
+| Check | Result |
+|---|---|
+| nc-like raw client: no answer, login without echo, `PRINT 2+2`, `PRIMT`, MODE 7 codes, a program and `RUN`, Ctrl-C in `20 GOTO 20` | as designed: no echo of the lines, plain text, codes as spaces, `Escape at line 20` |
+| Debian telnet (WSL, pty), shell mode: Ctrl-\ m, a line edited (Left, Backspace), RETURN, Up, a GET program (Y, N, Q one key each), Ctrl-V 81/82 in MODE 7, Ctrl-C, Ctrl-\ m back | all as designed; the edit line follows the prompt; the colours rendered |
+| Windows telnet.exe (ConPTY), shell mode: Home, End, Left, Delete, Up, Ctrl-U, Ctrl-\ m | all keys arrive; telnet.exe sends DEL (0x7F) for Delete, so there Delete deletes before the cursor |
+| The probe over Wi-Fi | the echo comes well inside `TND_SH_PROBE_US` |
+
+Not yet: PuTTY (Ctrl-\ reaches the server as 28; its key sequences), a terminal
+narrower than a long line, `telnetd_teletext=markers` on the hardware, and the
+emulator harness (`tools/telnetd-emu` on the old branch) brought up to the current
+stub.
