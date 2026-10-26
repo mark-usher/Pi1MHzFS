@@ -927,9 +927,16 @@ again on today's daemon, then put on upstream master (dp111's rework after PR #4
   reads, the copy cursor and Tek out.
 - **Shell mode starts after the Beeb's prompt**: the switch shows the Beeb's line
   again (as teletype mode does), and the edit line follows it.
-- **The first screen read waits for a pause in the typing** (`g_scan_wait`), only
-  that one: a filing system's output, a silent key or a return from teletype mode
-  read at once.
+- **The first screen read** goes at once, as upstream has it (ROM build 24 reads fast).
+  With `telnetd_debug=1` only, it waits for a pause in the typing (`g_scan_wait`), for
+  older ROMs; a filing system's output, a silent key or a return from teletype mode
+  read at once either way.
+- **A narrow terminal.** The edit line, longer than the space after the prompt, wraps
+  on the terminal, and moving along one row (ESC [ n D) cannot follow it. With the
+  window's width (NAWS) `sh_goto` moves by rows and columns - up, or line feeds down,
+  then CR and the column - minds a character in the last column (the terminal's wrap
+  waits for the next one), and `sh_hide` clears the rows below too (ESC [ J). The width
+  is taken while the line is not shown, so a resize takes it off as it was drawn.
 
 ### Results on the bench
 
@@ -940,7 +947,14 @@ again on today's daemon, then put on upstream master (dp111's rework after PR #4
 | Windows telnet.exe (ConPTY), shell mode: Home, End, Left, Delete, Up, Ctrl-U, Ctrl-\ m | all keys arrive; telnet.exe sends DEL (0x7F) for Delete, so there Delete deletes before the cursor |
 | The probe over Wi-Fi | the echo comes well inside `TND_SH_PROBE_US` |
 
-Not yet: PuTTY (Ctrl-\ reaches the server as 28; its key sequences), a terminal
-narrower than a long line, `telnetd_teletext=markers` on the hardware, and the
-emulator harness (`tools/telnetd-emu` on the old branch) brought up to the current
-stub.
+| plink (PuTTY's telnet backend, ConPTY): login, Ctrl-\ m, typing, RETURN, Ctrl-\ m back | negotiation and the hot key as designed (screen mode); plink, a console program, sends nothing for Home, the arrows or Delete - PuTTY's window does that, so those are on the manual list |
+
+The emulator harness (`tools/telnetd-emu`) now runs the firmware's own Pi code
+(`serial_redirect.c`, `telnetd.c`, `telnetd_proto.c`) against MOS 1.20, BASIC 2 and
+the TelnetD ROM on its 6502: 20 checks, among them a 20-column window with a wrapped
+edit line, all pass. `wrap_check.py` drives the shell editor alone through random
+edits in 13- to 80-column terminals: none wrong (the old row-only moves failed 109
+checks of 60 runs).
+
+Not yet: PuTTY's own window (its keys: Home, End, Delete, the arrows, F12, Ctrl-\),
+`telnetd_teletext=markers` on the hardware, and a second processor in the harness.

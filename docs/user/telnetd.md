@@ -545,8 +545,10 @@ The limits of this rule:
   switch to screen mode with Ctrl-\ m.
 - A program that reads a key and prints that same key followed by a new line looks
   exactly like a line prompt. The editor takes over after that key.
-- A line wider than your terminal redraws untidily when the Beeb prints during
-  typing.
+- A line longer than your window wraps onto the next rows, and is edited and drawn
+  there correctly, because the daemon knows the window's width (telnet's NAWS, which
+  telnet, PuTTY and Windows Terminal send). A client that does not say its width gets
+  a line drawn along one row, which redraws untidily once it wraps.
 - With the auto-start ROM (build 13 or later) Ctrl-V can type any code from &80: it
   goes to the program as it is. Without it, &80-&8A arrive as SHIFT with a function
   key and &90-&9A as CTRL with one (the MOS's default settings), and the codes no key
