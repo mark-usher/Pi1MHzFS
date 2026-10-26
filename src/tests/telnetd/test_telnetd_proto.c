@@ -1636,6 +1636,856 @@ static void test_bbcfont(void)
 #undef BBC
 }
 
+static void test_mode_decision(void)
+{
+   const uint32_t t0 = 5000000u;
+   tnd_in_t s;
+
+   tnd_in_reset(&s); in_reset();
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_UNDECIDED, "nothing yet: undecided");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0 + TND_DECIDE_US - 1u, t0) == TND_MODE_UNDECIDED, "just inside the window");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0 + TND_DECIDE_US, t0) == TND_MODE_LINE, "no answer in the window: line (nc)");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, 100u, 0xFFFFFF00u) == TND_MODE_UNDECIDED, "the clock wrapped, 356 us in");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, TND_DECIDE_US, 0xFFFFFF00u) == TND_MODE_LINE, "the clock wrapped, past the window");
+   CHECK(tnd_decide(&s, TND_SET_SCREEN, t0, t0) == TND_MODE_SCREEN, "the setting: screen");
+   CHECK(tnd_decide(&s, TND_SET_LINE, t0, t0) == TND_MODE_LINE, "the setting: line");
+   CHECK(!tnd_ga_wanted(&s), "nothing said: no GA");
+
+   /* A telnet client: any answer to the greeting. */
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\xff\xfd\x01\xff\xfd\x03\xff\xfb\x03");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_SCREEN, "DO ECHO, DO SGA: screen");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0 + 10u * TND_DECIDE_US, t0) == TND_MODE_SCREEN, "... and stays so");
+   CHECK(tnd_decide(&s, TND_SET_LINE, t0, t0) == TND_MODE_LINE, "the setting still wins");
+   CHECK(s.telnet && s.sga_do && !tnd_ga_wanted(&s), "SGA agreed: no GA");
+   FEED(&s, "PRINT\r");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_SCREEN, "typing does not change a terminal");
+
+   /* A telnet client that refuses the echo (Linux telnet's "mode line" at the start) is still a terminal. */
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\xff\xfe\x01\xff\xfe\x03\xff\xfc\x03");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_SCREEN, "DONT ECHO, DONT SGA: screen (its own line mode)");
+   CHECK(tnd_ga_wanted(&s), "it speaks telnet and did not agree SGA: GA wanted");
+
+   /* A raw client: its first bytes are data. */
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "PRINT 2+2\n");
+   CHECK(KEYS("PRINT 2+2\r"), "nc's line: keys, LF a RETURN");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_LINE, "data before any answer: line at once");
+   CHECK(!s.telnet && !tnd_ga_wanted(&s), "a raw client: no GA (it would be junk)");
+
+   /* Line mode by the setting: the server will not echo. */
+   tnd_in_reset(&s); in_reset();
+   s.refuse_echo = true;
+   FEED(&s, "\xff\xfd\x01");
+   static const uint8_t wont1[] = { 255, 252, 1 };
+   CHECK(nreply == 3 && memcmp(reply, wont1, 3) == 0, "forced line mode: DO ECHO is refused"); if (nreply != 3) dump();
+   in_reset();
+   FEED(&s, "\xff\xfd\x01");
+   CHECK(nreply == 0, "... once");
+   CHECK(tnd_decide(&s, TND_SET_LINE, t0, t0) == TND_MODE_LINE, "the setting holds");
+
+   /* An IAC IAC is data (a literal 0xFF), not a sign of telnet; any command is. */
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\xff\xff");
+   CHECK(!s.telnet && s.data, "IAC IAC: data, not telnet");
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\xff\xf1");
+   CHECK(s.telnet && !s.data, "IAC NOP: telnet, not data");
+   CHECK(tnd_decide(&s, TND_SET_AUTO, t0, t0) == TND_MODE_SCREEN, "a NOP: a telnet client");
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\xff\xfa\x18\x00xterm\xff\xf0");
+   CHECK(s.telnet && !s.data, "a subnegotiation is not data");
+}
+
+/* The line translator, fed a byte at a time; keys typed first. */
+static uint8_t lout[1 << 16]; static size_t nlout;
+static uint32_t lnow;
+
+static void lfeed(tnd_line_t *s, const void *data, size_t len)
+{
+   const uint8_t *p = data;
+   for (size_t i = 0; i < len; i++) {
+      uint8_t d[TND_LINE_OUT_MAX];
+      size_t n = tnd_line_beeb(s, p[i], lnow, d);
+      CHECK(n <= TND_LINE_OUT_MAX, "line output bound");
+      memcpy(lout + nlout, d, n); nlout += n;
+      lnow += 100u;
+   }
+}
+#define LFEED(s, lit) lfeed(s, lit, sizeof(lit) - 1)
+
+static void ltype(tnd_line_t *s, const void *data, size_t len)
+{
+   const uint8_t *p = data;
+   for (size_t i = 0; i < len; i++)
+      tnd_line_typed(s, p[i], lnow);
+}
+#define LTYPE(s, lit) ltype(s, lit, sizeof(lit) - 1)
+
+static void ltick(tnd_line_t *s, uint32_t advance)
+{
+   uint8_t d[TND_LINE_OUT_MAX];
+   lnow += advance;
+   size_t n = tnd_line_tick(s, lnow, d);
+   memcpy(lout + nlout, d, n); nlout += n;
+}
+
+static bool lout_is(const char *expect, size_t len)
+{
+   return nlout == len && memcmp(lout, expect, len) == 0;
+}
+#define LOUT(lit) lout_is(lit, sizeof(lit) - 1)
+
+static void ldump(void)
+{
+   printf("    out (%zu):", nlout);
+   for (size_t i = 0; i < nlout; i++)
+      printf(lout[i] >= 32 && lout[i] < 127 ? " %c" : " %02X", lout[i]);
+   printf("\n");
+}
+
+static void lstart(tnd_line_t *s, uint8_t mode)
+{
+   tnd_line_reset(s, true, mode);
+   nlout = 0;
+   lnow = 1000000u;
+}
+
+#define LCHECK(s, data, want, ...) do { nlout = 0; LFEED(s, data); \
+   CHECK(LOUT(want), __VA_ARGS__); if (!LOUT(want)) ldump(); } while (0)
+
+static void test_line_text(void)
+{
+   tnd_line_t s;
+
+   lstart(&s, 3);
+   LCHECK(&s, "HELLO", "HELLO", "text passes");
+   LCHECK(&s, "\n\r", "\r\n", "the MOS's LF CR: one CR LF");
+   LCHECK(&s, "A\r\nB", "A\r\nB", "CR LF: one CR LF");
+   LCHECK(&s, "\r\n\n\r", "\r\n\r\n", "a blank line survives");
+   LCHECK(&s, "W\r", "W", "a CR alone: held");
+   LCHECK(&s, "X", "\r\nX", "... text after it starts a new line (the Beeb would overwrite)");
+   LCHECK(&s, "\n\r\r\r", "\r\n", "CRs at the start of a line do nothing");
+   LCHECK(&s, "a\x07" "b", "a\x07" "b", "BEL passes");
+   LCHECK(&s, "a`b", "a\xc2\xa3" "b", "96 is the pound sign, UTF-8");
+   LCHECK(&s, "\n\rx\x7f\x7f", "\r\nx\b \b", "DELETE backs over what is on the line, not past its start");
+   LCHECK(&s, "\n\rab\x09" "c", "\r\nab c", "VDU 9 (cursor right) is a space");
+   LCHECK(&s, "q\x08\x0b\x1e\x1a\x0e\x0f\x10\x14\x02\x03\x04\x05\x06\x00", "q", "single-byte VDU codes are dropped");
+   LCHECK(&s, "\x0c", "\r\n", "CLS after text: a new line");
+   LCHECK(&s, "\x0c", "", "CLS at the start of a line: nothing");
+   LCHECK(&s, "\xc1\xff\x80", "", "outside MODE 7, user-defined characters are dropped");
+
+   tnd_line_reset(&s, false, 3);
+   LCHECK(&s, "`", "\xa3", "the pound sign in Latin-1");
+}
+
+static void test_line_vdu_params(void)
+{
+   tnd_line_t s;
+
+   lstart(&s, 3);
+   LCHECK(&s, "A\x1f\x41\x42" "B", "AB", "VDU 31 (TAB) and its two bytes, even when they are text");
+   LCHECK(&s, "\x11\x41" "C\x11\x81", "C", "VDU 17 (COLOUR) and its byte");
+   LCHECK(&s, "\x12\x0a\x0d" "D", "D", "VDU 18 (GCOL): parameter bytes 10 and 13 are not new lines");
+   LCHECK(&s, "\x13\x01\x02\x03\x04\x05" "E", "E", "VDU 19: five");
+   LCHECK(&s, "\x17\x01\x00\x00\x00\x00\x00\x00\x00\x00" "F", "F", "VDU 23: nine");
+   LCHECK(&s, "\x17\xe0\x0d\x0a\x07\x7f\x15\x06\x60\x41" "G", "G", "VDU 23 parameters that look like codes");
+   LCHECK(&s, "\x18\x00\x00\x00\x00\x10\x00\x10\x00" "H", "H", "VDU 24: eight");
+   LCHECK(&s, "\x19\x04\x00\x00\x00\x00\x19\x05\x10\x00\x10\x00" "I", "I", "VDU 25 (MOVE, DRAW): five each");
+   LCHECK(&s, "\x1c\x00\x18\x27\x00" "J", "J", "VDU 28: four");
+   LCHECK(&s, "\x1d\x00\x00\x00\x00" "K", "K", "VDU 29: four");
+   LCHECK(&s, "\x01\x41" "L", "L", "VDU 1 (to the printer only): one");
+
+   /* Split across calls: each byte is its own call already; feed in two slices too. */
+   nlout = 0;
+   LFEED(&s, "M\x1f\x05");
+   LFEED(&s, "\x06N");
+   CHECK(LOUT("MN"), "a VDU 31 split across two reads"); if (!LOUT("MN")) ldump();
+
+   LCHECK(&s, "\x16\x07", "\r\n", "MODE after text: a new line (the screen was cleared)");
+   LCHECK(&s, "\x16\x07", "", "MODE at the start of a line: nothing");
+   CHECK(s.tele, "MODE 7 noted");
+   LCHECK(&s, "\x16\x01" "\xc1", "", "MODE 1: high bytes are user-defined again");
+   CHECK(!s.tele, "MODE 1 noted");
+
+   /* VDU 21: nothing until VDU 6, parameters still counted. */
+   LCHECK(&s, "\n\rP\x15" "hidden\x1f\x06\x06" "more\x06" "Q", "\r\nPQ",
+          "VDU 21 hides everything until VDU 6, whose byte inside a VDU 31 does not count");
+}
+
+static void test_line_teletext(void)
+{
+   tnd_line_t s;
+
+   lstart(&s, 7);
+   LCHECK(&s, "\x81" "RED\x82" "GREEN", " RED GREEN", "colour codes are spaces, as on the screen");
+   LCHECK(&s, "\n\r\x8d" "BIG", "\r\n BIG", "double height: a space");
+   LCHECK(&s, "\n\r\xc8\xc9", "\r\nHI", "from 0xA0 bit 7 is ignored");
+   LCHECK(&s, "\n\r\x94\x7e\x2c\xa3" "AB\x87" "ab", "\r\n    AB ab",
+          "graphics: mosaics are spaces, capitals blast through, alpha again after 0x87");
+   LCHECK(&s, "\n\r\x97\x23\n\r" "#", "\r\n  \r\n#", "graphics end with the line");
+   LCHECK(&s, "\xff", " ", "0xFF is never written: a mosaic or DEL cell is a space");
+}
+
+static void test_line_echo(void)
+{
+   tnd_line_t s;
+
+   /* What BASIC does: the echo of the line, the MOS's new line, the answer, the prompt. */
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT 2+2\r");
+   LCHECK(&s, "PRINT 2+2\n\r         4\n\r>", "         4\r\n>", "the echo is taken out, the answer stays");
+   CHECK(s.en == 0 && s.matched == 0, "nothing left expected");
+
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT 2+2\r");
+   LCHECK(&s, "PRINT 2+2\r\n\r4", "4", "an echo ending CR LF CR");
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT 2+2\r");
+   LCHECK(&s, "PRINT 2+2\r4", "4", "an echo ending CR alone");
+   lstart(&s, 7);
+   LTYPE(&s, "X\r");
+   LCHECK(&s, "X\n\r\n\rA", "\r\nA", "after the echo's new line, a blank line of output stays");
+
+   lstart(&s, 7);
+   LCHECK(&s, ">", ">", "the prompt");
+   LTYPE(&s, "\r");
+   LCHECK(&s, "\n\r>", ">", "an empty line: its new line is the echo; the client is already on a new line");
+
+   /* Typed ahead: two lines, the second echoed after the first's output. */
+   lstart(&s, 7);
+   LTYPE(&s, "A\rB\r");
+   LCHECK(&s, "A\n\rout A\n\r>B\n\rout B\n\r>", "out A\r\n>out B\r\n>", "two lines typed ahead");
+
+   /* Output that only starts like the echo is not held for long. */
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT 1\r");
+   LCHECK(&s, "PRINTER\n\r>PRINT 1\n\r1\n\r>", "PRINTER\r\n>1\r\n>",
+          "a near match is written after all; the real echo later is still taken out");
+   CHECK(s.en == 0, "and it was");
+
+   lstart(&s, 7);
+   LTYPE(&s, "PP\r");
+   LCHECK(&s, "PPP\n\r", "PPP\r\n", "a match that breaks on its last key is written whole");
+   CHECK(s.en == 3, "and the echo is still expected");
+
+   /* Divergence: the echo is not what was typed (the line editor refused a key). */
+   lstart(&s, 7);
+   LTYPE(&s, "ABC\r");
+   LCHECK(&s, "AB\x07" "C\n\r", "AB\x07" "C\r\n", "a diverging echo is written in full");
+   ltick(&s, TND_ECHO_US);
+   CHECK(s.en == 0, "and given up once the Beeb is quiet");
+
+   /* No echo at all: a program reading with GET. */
+   lstart(&s, 7);
+   LTYPE(&s, "Y\r");
+   nlout = 0;
+   ltick(&s, TND_ECHO_US - 1u);
+   CHECK(s.en == 2, "not given up yet");
+   ltick(&s, 1u);
+   CHECK(s.en == 0 && nlout == 0, "given up after TND_ECHO_US");
+   LCHECK(&s, "You said Y\n\r", "You said Y\r\n", "so the program's text is not taken for an echo");
+
+   /* A line read without an echo (GET took its key) does not block the next one. */
+   lstart(&s, 7);
+   LTYPE(&s, "Y\rAB\r");
+   LCHECK(&s, "x\n\r>AB\n\r>", "x\r\n>>", "the next line's echo is matched past the unechoed one");
+   CHECK(s.en == 0 && s.skip == 0, "and both are forgotten");
+
+   lstart(&s, 7);
+   LTYPE(&s, "Y\rAB\r");
+   LCHECK(&s, "AC", "AC", "a near match of a later line is written");
+   CHECK(s.en == 5 && s.skip == 0 && s.matched == 0, "and the earlier line is still expected");
+   LCHECK(&s, "Y\n\rAB\n\r>", ">", "so its echo is still taken out, then the later one's");
+
+   /* Half an echo, then nothing. */
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT\r");
+   LCHECK(&s, "PRI", "", "held");
+   nlout = 0;
+   ltick(&s, TND_ECHO_US);
+   CHECK(LOUT("PRI") && s.en == 0, "written when the echo stops coming"); if (!LOUT("PRI")) ldump();
+
+   /* The echo of a key cannot be a parameter byte. */
+   lstart(&s, 7);
+   LTYPE(&s, "PR\r");
+   LCHECK(&s, "\x1fPR", "", "VDU 31,80,82: parameters, not the echo");
+   CHECK(s.en == 3 && s.matched == 0, "still expected");
+   LCHECK(&s, "PR\n\rPR", "PR", "the echo, then output");
+
+   /* DELETE in the line, and the pound sign. */
+   lstart(&s, 7);
+   LTYPE(&s, "AB\x7f" "C`\r");
+   LCHECK(&s, "AB\x7f" "C`\n\r>", ">", "DELETE and the pound sign echo as typed");
+
+   /* ESCAPE: the type-ahead is gone. */
+   lstart(&s, 7);
+   LTYPE(&s, "10 PRINT\r");
+   tnd_line_escape(&s);
+   CHECK(s.en == 0, "ESCAPE forgets the expected echo");
+   LCHECK(&s, "\n\rEscape\n\r>", "\r\nEscape\r\n>", "and the Beeb's answer is written");
+
+   /* Room: no more keys than can be matched. */
+   lstart(&s, 7);
+   CHECK(tnd_line_room(&s) == TND_LINE_EXP, "room for TND_LINE_EXP keys");
+   for (unsigned i = 0; i < TND_LINE_EXP + 5u; i++)
+      tnd_line_typed(&s, 'Z', lnow);
+   CHECK(tnd_line_room(&s) == 0 && s.en == TND_LINE_EXP, "full, and the extra keys not recorded");
+
+   /* The ring wraps: many lines through it. */
+   lstart(&s, 7);
+   nlout = 0;
+   for (unsigned i = 0; i < 500; i++) {
+      char line[16];
+      int len = snprintf(line, sizeof line, "%u", i * 7u);
+      ltype(&s, line, (size_t)len);
+      tnd_line_typed(&s, 13, lnow);
+      lfeed(&s, line, (size_t)len);
+      lfeed(&s, "\n\r>", 3);
+   }
+   CHECK(nlout == 500 && s.en == 0, "500 lines through the ring: only the prompts are left"); if (nlout != 500) ldump();
+}
+
+static void test_line_ga(void)
+{
+   tnd_line_t s;
+
+   lstart(&s, 7);
+   CHECK(!tnd_line_ga_due(&s, lnow + 10u * TND_GA_US, false), "nothing happened: no GA");
+   LFEED(&s, ">");
+   CHECK(!tnd_line_ga_due(&s, lnow + TND_GA_US - 101u, false), "not quiet for long enough");
+   CHECK(!tnd_line_ga_due(&s, lnow + TND_GA_US, true), "keys still waiting for the Beeb");
+   CHECK(tnd_line_ga_due(&s, lnow + TND_GA_US, false), "quiet, keys taken: GA");
+   CHECK(!tnd_line_ga_due(&s, lnow + 5u * TND_GA_US, false), "once");
+
+   LTYPE(&s, "A");
+   CHECK(!tnd_line_ga_due(&s, lnow + TND_GA_US - 1u, false), "a key typed: not quiet yet");
+   CHECK(tnd_line_ga_due(&s, lnow + TND_GA_US, false), "a key typed and nothing printed: GA after the quiet");
+
+   lstart(&s, 7);
+   LTYPE(&s, "PRINT\r");
+   LFEED(&s, "PRI");
+   CHECK(!tnd_line_ga_due(&s, lnow + TND_GA_US, false), "half an echo held: no GA");
+
+   lstart(&s, 7);
+   LTYPE(&s, "A\r");
+   LFEED(&s, "A\n\r");
+   CHECK(tnd_line_ga_due(&s, lnow + TND_GA_US, false), "an echo with nothing after it still ends with GA (the line was typed)");
+   lstart(&s, 7);
+   lnow = 0xFFFFFFF0u;
+   LFEED(&s, "x");
+   CHECK(!tnd_line_ga_due(&s, 0x100u, false), "the clock wrapped, not long enough");
+   CHECK(tnd_line_ga_due(&s, TND_GA_US, false), "the clock wrapped, quiet");
+}
+
+static void test_line_robustness(void)
+{
+   tnd_line_t s;
+   unsigned seed = 4242;
+   tnd_line_reset(&s, true, 7);
+   lnow = 0;
+   for (unsigned i = 0; i < 200000; i++) {
+      uint8_t d[TND_LINE_OUT_MAX];
+      size_t n;
+      seed = seed * 1103515245u + 12345u;
+      uint8_t c = (uint8_t)(seed >> 16);
+      if ((seed >> 8 & 7u) == 0u)
+         tnd_line_typed(&s, (uint8_t)(seed >> 24), lnow);
+      if ((seed >> 4 & 63u) == 0u)
+         c = (uint8_t)(seed >> 24);
+      n = tnd_line_beeb(&s, c, lnow, d);
+      CHECK(n <= TND_LINE_OUT_MAX, "line output bound at %u", i);
+      if (n > TND_LINE_OUT_MAX) return;
+      for (size_t j = 0; j < n; j++)
+         if (d[j] == 0xFF) { CHECK(0, "0xFF in the line output at %u", i); return; }
+      if ((i & 1023u) == 0u) {
+         lnow += TND_ECHO_US;
+         n = tnd_line_tick(&s, lnow, d);
+         CHECK(n <= TND_LINE_OUT_MAX, "tick bound");
+         if ((seed & 3u) == 0u)
+            tnd_line_escape(&s);
+      }
+      CHECK(s.en <= TND_LINE_EXP && s.skip + s.matched <= s.en, "the echo ring stays consistent");
+      lnow += 7u;
+   }
+   /* The largest release: a full ring matched and then broken. */
+   tnd_line_reset(&s, true, 3);
+   for (unsigned i = 0; i < TND_LINE_EXP; i++)
+      tnd_line_typed(&s, '`', 0u);
+   {
+      uint8_t d[TND_LINE_OUT_MAX];
+      size_t n = 0;
+      for (unsigned i = 0; i < TND_LINE_EXP; i++)
+         n += tnd_line_beeb(&s, '`', 0u, d);
+      CHECK(n == 0 && s.matched == TND_LINE_EXP, "a whole ring held");
+      tnd_line_reset(&s, true, 3);
+      for (unsigned i = 0; i < TND_LINE_EXP; i++)
+         tnd_line_typed(&s, '`', 0u);
+      for (unsigned i = 0; i + 1u < TND_LINE_EXP; i++)
+         (void)tnd_line_beeb(&s, '`', 0u, d);
+      s.cr = true; s.col = 1;
+      n = tnd_line_beeb(&s, 'x', 0u, d);
+      CHECK(n <= TND_LINE_OUT_MAX && n == 2u * (TND_LINE_EXP - 1u) + 2u + 1u, "the biggest release fits (%zu)", n);
+   }
+}
+
+/* ---- shell mode ------------------------------------------------------------------ */
+
+static tnd_shell_t sh;
+static tnd_in_t    shin;
+static uint8_t     scli[1 << 18]; static size_t nscli;
+static uint8_t     skey[1 << 14]; static size_t nskey;
+static int         sesc;
+static uint32_t    snow;
+static uint8_t     iocli[TND_SH_CLI_MAX], iokeys[TND_SH_KEYS_MAX];
+
+static void sh_take(tnd_sh_io_t *io)
+{
+   CHECK(io->ncli <= TND_SH_CLI_MAX && io->nkeys <= TND_SH_KEYS_MAX, "shell io bounds");
+   memcpy(scli + nscli, io->cli, io->ncli); nscli += io->ncli;
+   memcpy(skey + nskey, io->keys, io->nkeys); nskey += io->nkeys;
+   if (io->escape) sesc++;
+}
+
+static void sh_newio(tnd_sh_io_t *io)
+{
+   io->cli = iocli; io->ncli = 0; io->keys = iokeys; io->nkeys = 0; io->escape = false;
+}
+
+static void sstart(uint8_t ttx)
+{
+   tnd_shell_reset(&sh, true, 7, ttx);
+   tnd_in_reset(&shin);
+   shin.edit_keys = true;
+   nscli = nskey = 0; sesc = 0;
+   snow = 50000000u;                             /* the Beeb long quiet */
+}
+
+/* Client bytes, through tnd_in as the daemon does. */
+static void stype(const void *data, size_t len)
+{
+   const uint8_t *p = data;
+   for (size_t i = 0; i < len; i++) {
+      uint8_t k[TND_IN_KEYS], r[TND_IN_REPLY];
+      size_t rl, n = tnd_in_byte(&shin, p[i], snow, k, r, &rl);
+      for (size_t j = 0; j < n; j++) {
+         tnd_sh_io_t io; sh_newio(&io);
+         tnd_shell_key(&sh, k[j], snow, &io);
+         sh_take(&io);
+      }
+      snow += 1000u;
+   }
+}
+#define STYPE(lit) stype(lit, sizeof(lit) - 1)
+
+static void sbeeb(const void *data, size_t len)
+{
+   const uint8_t *p = data;
+   for (size_t i = 0; i < len; i++) {
+      tnd_sh_io_t io; sh_newio(&io);
+      tnd_shell_beeb(&sh, p[i], snow, &io);
+      sh_take(&io);
+      snow += 100u;
+   }
+}
+#define SBEEB(lit) sbeeb(lit, sizeof(lit) - 1)
+
+static void stick(uint32_t advance)
+{
+   uint32_t end = snow + advance;
+   while (snow < end) {                          /* the daemon's passes, every 5 ms here */
+      uint32_t step = end - snow < 5000u ? end - snow : 5000u;
+      tnd_sh_io_t io; sh_newio(&io);
+      snow += step;
+      tnd_shell_tick(&sh, snow, &io);
+      sh_take(&io);
+   }
+}
+
+static bool skeys_are(const char *expect, size_t len)
+{
+   return nskey == len && memcmp(skey, expect, len) == 0;
+}
+#define SKEYS(lit) skeys_are(lit, sizeof(lit) - 1)
+
+static bool sline_is(const char *expect)
+{
+   return sh.len == strlen(expect) && memcmp(sh.line, expect, sh.len) == 0;
+}
+
+/* The client's screen, roughly: what is left after the escape sequences are taken out. */
+static const char *scli_text(void)
+{
+   static char t[1 << 18];
+   size_t n = 0;
+   for (size_t i = 0; i < nscli; i++) {
+      if (scli[i] == 27 && i + 1 < nscli && scli[i + 1] == '[') {
+         i += 2;
+         while (i < nscli && !(scli[i] >= 0x40 && scli[i] <= 0x7E)) i++;
+         continue;
+      }
+      t[n++] = (char)scli[i];
+   }
+   t[n] = 0;
+   return t;
+}
+
+static bool scli_has(const char *needle)
+{
+   size_t n = strlen(needle);
+   for (size_t i = 0; i + n <= nscli; i++)
+      if (memcmp(scli + i, needle, n) == 0) return true;
+   return false;
+}
+
+static void sdump(void)
+{
+   printf("    state %u line [%.*s] cur %u keys:", sh.state, sh.len, sh.line, sh.cur);
+   for (size_t i = 0; i < nskey; i++) printf(" %02X", skey[i]);
+   printf("\n    cli: %s\n", scli_text());
+}
+
+static void test_shell_in_keys(void)
+{
+   tnd_in_t s; tnd_in_reset(&s); in_reset();
+   s.edit_keys = true;
+   FEED(&s, "\x1b[1~\x1b[7~\x1b[H\x1bOH");
+   CHECK(nkeys == 4 && keys[0] == TND_KEY_HOME && keys[3] == TND_KEY_HOME, "shell: Home in its four forms"); if (nkeys != 4) dump();
+   in_reset();
+   FEED(&s, "\x1b[3~\x1b[4~\x1b[F\x1bOF\x7f\x08");
+   CHECK(nkeys == 6 && keys[0] == TND_KEY_DELFWD && keys[1] == 139 && keys[2] == 139 && keys[3] == 139
+         && keys[4] == 127 && keys[5] == 127, "shell: Delete forwards; End (VT220, xterm, SS3); BS and DEL back"); if (nkeys != 6) dump();
+   in_reset();
+   FEED(&s, "\x1b[A\x1b[B\x1b[C\x1b[D\x1bOA");
+   CHECK(nkeys == 5 && keys[0] == 143 && keys[1] == 142 && keys[2] == 141 && keys[3] == 140 && keys[4] == 143, "shell: arrows, CSI and SS3");
+
+   tnd_in_reset(&s); in_reset();
+   FEED(&s, "\x1b[1~\x1b[3~\x1b[H");
+   CHECK(nkeys == 1 && keys[0] == 127, "screen mode unchanged: Home nothing, Delete is DELETE"); if (nkeys != 1) dump();
+}
+
+static void test_hotkey(void)
+{
+   bool armed = false;
+   CHECK(tnd_hotkey(&armed, 'm') == TND_HOT_NONE && !armed, "an ordinary key");
+   CHECK(tnd_hotkey(&armed, 0x1C) == TND_HOT_SWALLOW && armed, "Ctrl-\\ arms");
+   CHECK(tnd_hotkey(&armed, 'm') == TND_HOT_MODE && !armed, "then m: the mode");
+   (void)tnd_hotkey(&armed, 0x1C);
+   CHECK(tnd_hotkey(&armed, 'T') == TND_HOT_TTX, "then T: teletext");
+   (void)tnd_hotkey(&armed, 0x1C);
+   CHECK(tnd_hotkey(&armed, 0x1C) == TND_HOT_LITERAL && !armed, "Ctrl-\\ twice: one for the Beeb");
+   (void)tnd_hotkey(&armed, 0x1C);
+   CHECK(tnd_hotkey(&armed, 'x') == TND_HOT_SWALLOW && !armed, "anything else: dropped");
+   CHECK(tnd_hotkey(&armed, 'x') == TND_HOT_NONE, "and keys are keys again");
+}
+
+static void test_key_for_char(void)
+{
+   CHECK(tnd_key_for_char('A') == 'A' && tnd_key_for_char(28) == 28 && tnd_key_for_char(0) == 0, "ASCII and controls as they are, not NUL");
+   CHECK(tnd_key_for_char(0x81) == 0x91 && tnd_key_for_char(0x8A) == 0x9A, "&80-&8A: SHIFT and a function key");
+   CHECK(tnd_key_for_char(0x94) == 0xA4 && tnd_key_for_char(0x9A) == 0xAA, "&90-&9A: CTRL and a function key");
+   CHECK(tnd_key_for_char(0x8D) == 0 && tnd_key_for_char(0x9D) == 0 && tnd_key_for_char(0x9F) == 0, "&8B-&8F, &9B-&9F: no key gives them");
+   CHECK(tnd_key_for_char(0xA1) == 0 && tnd_key_for_char(0xC5) == 0, "&A0-&CF: none");
+   CHECK(tnd_key_for_char(0xD3) == 0xD3 && tnd_key_for_char(0xFA) == 0xFA && tnd_key_for_char(0xFF) == 0 && tnd_key_for_char(0xFB) == 0, "&D0-&DA, &E0-&EA, &F0-&FA themselves; not &FF");
+}
+
+static void test_shell_probe_and_line(void)
+{
+   sstart(TND_TTX_RENDERED);
+   STYPE("P");
+   CHECK(sh.state == TND_SH_PROBE && SKEYS("P"), "a quiet Beeb: the key goes as a probe"); if (!SKEYS("P")) sdump();
+   SBEEB("P");
+   CHECK(sh.state == TND_SH_EDIT && SKEYS("P\x7f") && sline_is("P"), "echoed: the editor has it, a DELETE takes it back"); if (!SKEYS("P\x7f")) sdump();
+   CHECK(strcmp(scli_text(), "P") == 0, "the client sees the P (drawn by the editor)"); if (strcmp(scli_text(), "P")) sdump();
+   SBEEB("\x7f");
+   CHECK(strcmp(scli_text(), "P") == 0, "the DELETE's echo is dropped");
+   STYPE("RINT 2+2");
+   CHECK(sline_is("PRINT 2+2") && SKEYS("P\x7f"), "the rest is edited on the Pi, nothing sent"); if (!sline_is("PRINT 2+2")) sdump();
+   nscli = 0;
+   STYPE("\r");
+   CHECK(SKEYS("P\x7fPRINT 2+2\r") && sh.state == TND_SH_IDLE, "RETURN: the line and RETURN to the Beeb"); if (!SKEYS("P\x7fPRINT 2+2\r")) sdump();
+   CHECK(strstr(scli_text(), "PRINT 2+2\r\n") != NULL, "and the client is on a new line"); if (!strstr(scli_text(), "PRINT 2+2\r\n")) sdump();
+   nscli = 0;
+   SBEEB("PRINT 2+2\n\r         4\n\r>");
+   CHECK(strcmp(scli_text(), "         4\r\n>") == 0, "the Beeb's echo is taken out, the answer stays"); if (strcmp(scli_text(), "         4\r\n>")) sdump();
+   CHECK(sh.hn == 1 && sh.hlen[0] == 9, "the line is in the history");
+
+   /* Typed fast: the probe's outcome decides for the keys behind it. */
+   sstart(TND_TTX_RENDERED);
+   STYPE("PRINT 1\r");
+   CHECK(SKEYS("P") && sh.nq == 7, "keys behind a probe wait"); if (!SKEYS("P")) sdump();
+   SBEEB("P");
+   CHECK(SKEYS("P\x7fPRINT 1\r") && sh.state == TND_SH_IDLE, "the echo: the waiting keys are the line, RETURN sends it"); if (!SKEYS("P\x7fPRINT 1\r")) sdump();
+
+   /* A program reading keys: no echo. */
+   sstart(TND_TTX_RENDERED);
+   STYPE("Y");
+   CHECK(sh.state == TND_SH_PROBE, "a probe");
+   STYPE("N");
+   stick(TND_SH_PROBE_US);
+   CHECK(sh.state == TND_SH_PASS && SKEYS("YN"), "no echo in time: keys go straight, the held one too"); if (!SKEYS("YN")) sdump();
+   STYPE("\x1b[A" "Q\r");
+   CHECK(SKEYS("YN\x8fQ\r"), "while passing: the arrow as the Beeb's key, RETURN too"); if (!SKEYS("YN\x8fQ\r")) sdump();
+   stick(TND_SH_PASS_US);
+   CHECK(sh.state == TND_SH_IDLE, "idle again after TND_SH_PASS_US with no keys");
+
+   /* A program that prints something else first. */
+   sstart(TND_TTX_RENDERED);
+   STYPE("Y");
+   SBEEB("GOT 89\n\r");
+   CHECK(sh.state == TND_SH_PASS && strstr(scli_text(), "GOT 89") != NULL, "other output: a program took it"); if (sh.state != TND_SH_PASS) sdump();
+
+   /* A Beeb that is busy printing: keys go straight, no probe. */
+   sstart(TND_TTX_RENDERED);
+   SBEEB("LISTING...");
+   STYPE("A");
+   CHECK(sh.state == TND_SH_PASS && SKEYS("A"), "output just now: straight through");
+
+   /* An editing key at a quiet Beeb opens the editor without a probe. */
+   sstart(TND_TTX_RENDERED);
+   STYPE("\x1b[A");
+   CHECK(sh.state == TND_SH_EDIT && nskey == 0, "Up at a quiet Beeb: the editor, nothing sent");
+   STYPE("\r");
+   CHECK(SKEYS("\r") && strstr(scli_text(), "\r\n"), "an empty line: RETURN alone");
+}
+
+static void sedit_start(const char *text)
+{
+   sstart(TND_TTX_RENDERED);
+   stype("\x1b[D", 3);                           /* Left: into the editor, empty */
+   stype(text, strlen(text));
+}
+
+static void test_shell_editing(void)
+{
+   sedit_start("HELLO");
+   CHECK(sline_is("HELLO") && sh.cur == 5, "typed");
+   STYPE("\x1b[D\x1b[D" "X");
+   CHECK(sline_is("HELXLO") && sh.cur == 4, "left twice, insert mid-line"); if (!sline_is("HELXLO")) sdump();
+   STYPE("\x01" "A");
+   CHECK(sline_is("AHELXLO") && sh.cur == 1, "Ctrl-A, insert at the start");
+   STYPE("\x05" "Z");
+   CHECK(sline_is("AHELXLOZ") && sh.cur == 8, "Ctrl-E, at the end");
+   STYPE("\x1b[1~" "1" "\x1b[4~" "4");
+   CHECK(sline_is("1AHELXLOZ4"), "PuTTY's Home and End"); if (!sline_is("1AHELXLOZ4")) sdump();
+   STYPE("\x1b[H" "\x1b[3~");
+   CHECK(sline_is("AHELXLOZ4") && sh.cur == 0, "xterm Home, VT220 Delete deletes forwards");
+   STYPE("\x1bOF\x7f\x08");
+   CHECK(sline_is("AHELXLO"), "SS3 End, then DEL and BS delete backwards"); if (!sline_is("AHELXLO")) sdump();
+   STYPE("\x1b[D\x1b[D\x1b[D\x0b");
+   CHECK(sline_is("AHEL") && sh.cur == 4, "Ctrl-K: to the end");
+   STYPE("\x1b[D\x15");
+   CHECK(sline_is("L") && sh.cur == 0, "Ctrl-U: to the start");
+   sedit_start("PRINT A B  ");
+   STYPE("\x17");
+   CHECK(sline_is("PRINT A ") , "Ctrl-W: spaces, then the word"); if (!sline_is("PRINT A ")) sdump();
+   STYPE("\x17\x17");
+   CHECK(sline_is(""), "Ctrl-W twice more: empty");
+   STYPE("\x7f\x1b[3~\x1b[D\x1b[C");
+   CHECK(sline_is("") && sh.cur == 0, "editing keys on an empty line do nothing");
+   sedit_start("AB");
+   STYPE("\x02\x02\x06" "x" "\x04");
+   CHECK(sline_is("AxB") || sline_is("Ax"), "Ctrl-B, Ctrl-F, Ctrl-D");
+   CHECK(sline_is("Ax"), "Ctrl-D deletes under the cursor"); if (!sline_is("Ax")) sdump();
+
+   /* A full line: the extra keys are dropped. */
+   sstart(TND_TTX_RENDERED);
+   stype("\x1b[D", 3);
+   for (unsigned i = 0; i < TND_SH_LINE + 10u; i++) stype("x", 1);
+   CHECK(sh.len == TND_SH_LINE, "the line holds TND_SH_LINE characters");
+
+   /* Ctrl-L: the line drawn again. */
+   sedit_start("AB");
+   nscli = 0;
+   STYPE("\x0c");
+   CHECK(strcmp(scli_text(), "AB") == 0 && scli_has("\x1b[K"), "Ctrl-L redraws"); if (strcmp(scli_text(), "AB")) sdump();
+}
+
+static void submit(const char *line)
+{
+   stype("\x1b[D", 3);
+   stype(line, strlen(line));
+   stype("\r", 1);
+   SBEEB("\n\r>");                                /* (no echo: the expectation is given up later) */
+   stick(TND_ECHO_US + 10000u);
+}
+
+static void test_shell_history(void)
+{
+   sstart(TND_TTX_RENDERED);
+   submit("ONE"); submit("TWO"); submit("THREE");
+   CHECK(sh.hn == 3, "three lines");
+   STYPE("\x1b[A");
+   CHECK(sline_is("THREE"), "Up: the newest");
+   STYPE("\x1b[A\x1b[A");
+   CHECK(sline_is("ONE"), "Up twice more: the oldest");
+   nscli = 0;
+   STYPE("\x1b[A");
+   CHECK(sline_is("ONE") && scli_has("\a"), "past the oldest: a bell");
+   STYPE("\x1b[B\x1b[B\x1b[B");
+   CHECK(sline_is(""), "Down past the newest: the line being typed (empty)");
+   STYPE("NEW" "\x1b[A\x1b[B");
+   CHECK(sline_is("NEW"), "a part-typed line comes back under the history");
+   STYPE("\x1b[A" "!" "\r");
+   CHECK(sh.hn == 4 && sh.hlen[0] == 6 && memcmp(sh.hist[0], "THREE!", 6) == 0, "a recalled line edited and sent is a new entry");
+   SBEEB("\n\r>"); stick(TND_ECHO_US + 10000u);
+   submit("TWO");
+   CHECK(sh.hn == 4 && memcmp(sh.hist[0], "TWO", 3) == 0 && memcmp(sh.hist[3], "ONE", 3) == 0, "a repeated line moves to the front, not a copy");
+   submit("");
+   CHECK(sh.hn == 4, "empty lines are not kept");
+   for (unsigned i = 0; i < 40; i++) {
+      char l[8]; snprintf(l, sizeof l, "L%u", i);
+      submit(l);
+   }
+   CHECK(sh.hn == TND_SH_HIST && memcmp(sh.hist[0], "L39", 3) == 0, "bounded: the newest TND_SH_HIST");
+
+   /* Ctrl-R: older lines with what was typed in them. */
+   sstart(TND_TTX_RENDERED);
+   submit("PRINT 1"); submit("LIST"); submit("PRINT 2"); submit("RUN");
+   stype("\x1b[D", 3);
+   STYPE("PRI\x12");
+   CHECK(sline_is("PRINT 2"), "Ctrl-R: the newest with PRI"); if (!sline_is("PRINT 2")) sdump();
+   STYPE("\x12");
+   CHECK(sline_is("PRINT 1"), "again: the next older");
+   nscli = 0;
+   STYPE("\x12");
+   CHECK(sline_is("PRINT 1") && scli_has("\a"), "none older: a bell");
+   STYPE("\x1b[B\x1b[B\x1b[B\x1b[B");
+   CHECK(sline_is("PRI"), "Down to the end: back to what was typed");
+}
+
+static void test_shell_ctrlv(void)
+{
+   sedit_start("A");
+   STYPE("\x16" "81" "B" "\x16" "9d" "\x16" "zz");
+   CHECK(sh.len == 4 && sh.line[1] == 0x81 && sh.line[2] == 'B' && sh.line[3] == 'z', "Ctrl-V 81: &81; &9D (no key gives it) and Ctrl-V z refused"); if (sh.len != 4) sdump();
+   CHECK(scli_has("\a"), "with a bell");
+   nscli = 0;
+   STYPE("\x1b[D\x1b[D\x0c");
+   CHECK(scli_has("\x1b[31m\xe2\x96\x88\x1b[39m"), "the code shown as its marker, a red block"); if (!scli_has("\x1b[31m")) sdump();
+   nskey = 0;
+   STYPE("\r");
+   CHECK(SKEYS("A\x91" "Bz\r"), "sent as the key that gives &81: SHIFT f1 (&91)"); if (!SKEYS("A\x91" "Bz\r")) sdump();
+   nscli = 0;
+   SBEEB("A\x81" "Bz\n\r>");
+   CHECK(strcmp(scli_text(), ">") == 0, "the echo is &81 itself, and is taken out"); if (strcmp(scli_text(), ">")) sdump();
+}
+
+static void test_shell_redraw(void)
+{
+   sedit_start("PRI");
+   nscli = 0;
+   SBEEB("TICK\n\r");
+   CHECK(scli_has("\x1b[3D\x1b[K" "TICK\r\n"), "output while typing: the edit line comes off first"); if (!scli_has("\x1b[3D\x1b[K")) sdump();
+   CHECK(!sh.shown, "and is not shown meanwhile");
+   stick(TND_SH_REDRAW_US / 2u);
+   CHECK(!sh.shown, "not while the output may go on");
+   stick(TND_SH_REDRAW_US);
+   CHECK(sh.shown && strcmp(scli_text(), "TICK\r\nPRI") == 0, "once quiet: drawn again under it"); if (strcmp(scli_text(), "TICK\r\nPRI")) sdump();
+   STYPE("NT");
+   CHECK(sline_is("PRINT"), "and editing carries on");
+
+   /* ESCAPE: the line goes, the request is made. */
+   sedit_start("PRINT");
+   STYPE("\x03");
+   CHECK(sesc == 1 && sh.state == TND_SH_IDLE && sh.len == 0, "Ctrl-C: ESCAPE, the line dropped");
+   sedit_start("PRINT");
+   STYPE("\x1b");
+   stick(TND_ESC_US + 1000u);
+   {  /* a lone ESC, after the wait */
+      uint8_t k[TND_IN_KEYS];
+      size_t n = tnd_in_tick(&shin, snow, k);
+      for (size_t j = 0; j < n; j++) { tnd_sh_io_t io; sh_newio(&io); tnd_shell_key(&sh, k[j], snow, &io); sh_take(&io); }
+   }
+   CHECK(sesc == 1 && sh.len == 0, "a lone ESC: ESCAPE too");
+}
+
+static void test_line_teletext_styles(void)
+{
+   tnd_line_t s;
+   uint8_t d[TND_LINE_GLYPH_MAX];
+
+   CHECK(tnd_marker(0x81, true, d) == 13 && memcmp(d, "\x1b[31m\xe2\x96\x88\x1b[39m", 13) == 0, "marker: alpha red, a red block");
+   CHECK(tnd_marker(0x94, true, d) == 13 && memcmp(d, "\x1b[34m\xe2\x96\x92\x1b[39m", 13) == 0, "marker: graphics blue, a shaded block");
+   CHECK(tnd_marker(0x8D, true, d) == 10 && memcmp(d, "\x1b[7m" "2" "\x1b[27m", 10) == 0, "marker: double height, a reversed 2");
+   CHECK(tnd_marker(0x9D, true, d) == 10 && d[4] == 'B', "marker: new background, B");
+   CHECK(tnd_marker(0x81, false, d) == 11 && d[5] == '#', "marker, no UTF-8: #");
+   CHECK(tnd_marker(96, true, d) == 2 && d[0] == 0xC2, "the pound sign");
+
+   /* Markers: the columns kept. */
+   lstart(&s, 7); tnd_line_ttx(&s, TND_TTX_MARKERS);
+   nlout = 0;
+   LFEED(&s, "10 PRINT \"\x81" "RED\x8d" "BIG\"\n\r");
+   {
+      char t[256]; size_t n = 0;
+      for (size_t i = 0; i < nlout; i++) {
+         if (lout[i] == 27) { while (i < nlout && !(lout[i] >= 0x40 && lout[i] <= 0x7E && lout[i] != '[')) i++; continue; }
+         if ((lout[i] & 0xC0) == 0x80) continue;     /* UTF-8 continuation: one column */
+         t[n++] = (char)lout[i];
+      }
+      t[n] = 0;
+      CHECK(strcmp(t, "10 PRINT \"\xe2RED2BIG\"\r\n") == 0, "markers keep each code's column"); if (strcmp(t, "10 PRINT \"\xe2RED2BIG\"\r\n")) ldump();
+   }
+
+   /* Rendered: the codes take effect. */
+   lstart(&s, 7); tnd_line_ttx(&s, TND_TTX_RENDERED);
+   LCHECK(&s, "\x81RED\x82GRN\n\r", " \x1b[0;31mRED \x1b[0;32mGRN\x1b[0m\r\n", "rendered: colour from the next cell, reset at the end of the line");
+   LCHECK(&s, "\x94\x7e\x2c" "A\n\r", " \x1b[0;34m\xf0\x9f\xac\xbb\xf0\x9f\xac\x8b" "A\x1b[0m\r\n", "rendered: mosaics as sextants, capitals blast through");
+   LCHECK(&s, "#_`\n\r", "#\xe2\x80\x95\xc2\xa3\r\n", "rendered: # _ and the pound as MODE 7 shows them");
+   LCHECK(&s, "\x81\x9d" "X\n\r", " \x1b[0;31;41m X\x1b[0m\r\n" , "rendered: new background");
+   /* the Beeb's 40-column rows: a new row starts plain */
+   {
+      char row[64];
+      memset(row, 'a', 39); row[0] = (char)0x81; row[39] = 'b';
+      nlout = 0;
+      lfeed(&s, row, 40);
+      LFEED(&s, "c");
+      CHECK(nlout > 0 && lout[nlout - 1] == 'c' && memcmp(lout + nlout - 5, "\x1b[0m", 4) == 0, "row 2 of a wrapped line starts plain"); if (lout[nlout - 1] != 'c') ldump();
+   }
+   /* plain: tnd_line_plain resets the colours for someone else's text */
+   lstart(&s, 7); tnd_line_ttx(&s, TND_TTX_RENDERED);
+   nlout = 0; LFEED(&s, "\x81X");
+   CHECK(tnd_line_plain(&s, d) == 4 && tnd_line_plain(&s, d) == 0, "plain once, then nothing to do");
+   nlout = 0; LFEED(&s, "Y");
+   CHECK(nlout > 1 && lout[0] == 27, "and the colour comes back before the next text");
+
+   /* Spaces (raw line mode): unchanged. */
+   lstart(&s, 7);
+   LCHECK(&s, "\x81" "RED\n\r", " RED\r\n", "spaces: as before");
+}
+
+static void test_shell_robustness(void)
+{
+   unsigned seed = 99;
+   static const char *seqs[] = { "\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D", "\x1b[1~", "\x1b[3~", "\x1b[4~",
+                                 "\x01", "\x05", "\x0b", "\x15", "\x17", "\x12", "\x16", "\r", "\x7f", "\x0c" };
+   for (unsigned ttx = 0; ttx < 3; ttx++) {
+      sstart((uint8_t)ttx);
+      for (unsigned i = 0; i < 30000; i++) {
+         seed = seed * 1103515245u + 12345u;
+         unsigned r = seed >> 16;
+         nscli = nskey = 0;
+         if ((r & 7u) == 0u) {
+            const char *q = seqs[(r >> 3) % (sizeof seqs / sizeof seqs[0])];
+            stype(q, strlen(q));
+         } else if ((r & 7u) < 4u) {
+            uint8_t c = (uint8_t)(32u + (r >> 4) % 95u);
+            stype(&c, 1);
+         } else if ((r & 7u) < 7u) {
+            uint8_t c = (uint8_t)(r >> 5);
+            sbeeb(&c, 1);
+         } else {
+            stick((r >> 4) % 400000u);
+         }
+         for (size_t j = 0; j < nscli; j++)
+            if (scli[j] == 0xFF) { CHECK(0, "0xFF to the client"); return; }
+         CHECK(sh.len <= TND_SH_LINE && sh.cur <= sh.len && sh.nq <= TND_SH_QUEUE && sh.hn <= TND_SH_HIST, "editor state stays sane");
+      }
+   }
+   CHECK(true, "shell fuzz ran");
+}
+
 int main(void)
 {
    test_plain_keys();
@@ -1656,6 +2506,23 @@ int main(void)
    test_output_teletext();
    test_output_teletext_chip();
    test_bbcfont();
+   test_mode_decision();
+   test_line_text();
+   test_line_vdu_params();
+   test_line_teletext();
+   test_line_echo();
+   test_line_ga();
+   test_line_robustness();
+   test_shell_in_keys();
+   test_hotkey();
+   test_key_for_char();
+   test_shell_probe_and_line();
+   test_shell_editing();
+   test_shell_history();
+   test_shell_ctrlv();
+   test_shell_redraw();
+   test_line_teletext_styles();
+   test_shell_robustness();
    test_tek();
    test_output_robustness();
    test_model_wrap_scroll();

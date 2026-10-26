@@ -52,6 +52,11 @@
 /* The next key is a byte for the Beeb to read as it is (a character above 127): the daemon sends it
    behind the ROM's LITKEY (ROM build 13), which reads it past the MOS's soft and cursor keys. */
 #define TND_KEY_LIT    0xFAu
+
+/* Shell mode only (tnd_in_t.edit_keys): Home, and Delete (the character under the cursor), which
+   screen mode does not have (it sends DELETE for both Delete keys). */
+#define TND_KEY_HOME   0xF7u
+#define TND_KEY_DELFWD 0xF6u
 #define TND_IN_REPLY   32u     /* most negotiation bytes one input byte needs (WILL LINEMODE's answer) */
 #define TND_GREETING_LEN 15u
 #define TND_OPT_LINEMODE 34u  /* telnet option 34: the client edits lines itself (RFC 1184) */
@@ -112,6 +117,12 @@ typedef struct {
    bool     lm_offered;         /* ... its first WILL LINEMODE, which Linux telnet sends as it connects, was
                                    refused (DONT): only a later one, at "mode line", is taken */
    uint8_t  resume;             /* the state a telnet command inside an escape sequence goes back to */
+   /* What the client has said, for choosing screen or line mode (tnd_decide). */
+   bool     telnet;             /* the client has sent a telnet command (IAC ...): it speaks telnet */
+   bool     data;               /* the client has sent data, not only negotiation */
+   bool     sga_do;             /* it agreed to our WILL SGA (DO SGA): no IAC GA for it */
+   bool     refuse_echo;        /* set by the daemon, line mode by the setting: DO ECHO is refused */
+   bool     edit_keys;          /* set by the daemon, shell mode: Home and Delete as TND_KEY_HOME, TND_KEY_DELFWD */
 } tnd_in_t;
 
 void   tnd_in_reset(tnd_in_t *s);
@@ -292,6 +303,210 @@ size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX
    that are not the Beeb's): writes the clear, MODE 7's line attributes and the cursor, and puts
    every row to be drawn by tnd_out_dirty_row.  0 if the cursor is not known. */
 size_t tnd_out_redraw(tnd_out_t *s, uint8_t dst[TND_COPY_MAX]);
+
+/* ---- line mode ----------------------------------------------------------------
+   A client that is not a terminal (nc, a script, a raw socket) gets line mode: it types
+   whole lines itself and is sent what the Beeb prints as plain text, without the Beeb's
+   echo of the line it typed.
+
+   Choosing the mode (tnd_decide), from what the client does after the greeting:
+      any telnet command (an answer)       -> screen (a telnet client: a terminal)
+      data before any answer, or no answer
+      within TND_DECIDE_US                 -> line   (nc, a script)
+      otherwise                            -> not yet decided
+   A telnet client in its own line mode (Linux telnet's "mode line": DONT ECHO, LINEMODE)
+   stays in screen mode, which draws the screen again around its local echo.  The setting
+   (telnetd_linemode) overrides the rules; shell mode is a terminal's choice (the setting
+   or the hot key). */
+
+#define TND_MODE_UNDECIDED 0u
+#define TND_MODE_SCREEN    1u
+#define TND_MODE_LINE      2u
+#define TND_MODE_SHELL     3u          /* a terminal, with the Pi's line editor (tnd_shell_*) */
+#define TND_SET_AUTO       0u
+#define TND_SET_SCREEN     1u
+#define TND_SET_LINE       2u
+#define TND_DECIDE_US      750000u
+
+uint8_t tnd_decide(const tnd_in_t *s, uint8_t setting, uint32_t now_us, uint32_t start_us);
+
+/* Does an end of output (IAC GA) mean anything to this client?  Only one that speaks
+   telnet and has not agreed to suppress go-ahead (DO SGA); to a raw client it is junk. */
+bool    tnd_ga_wanted(const tnd_in_t *s);
+
+#define TND_LINE_EXP     256u    /* keys whose echo is waited for */
+#define TND_LINE_GLYPH_MAX 32u   /* most bytes one Beeb byte becomes (a new line, colours, a glyph) */
+#define TND_LINE_OUT_MAX (TND_LINE_GLYPH_MAX * (TND_LINE_EXP + 1u))   /* most bytes one call writes */
+
+/* What teletext control codes (MODE 7, &80-&9F) become in line and shell mode. */
+#define TND_TTX_SPACES   0u      /* a space each, no escape codes: raw line mode (nc, scripts) */
+#define TND_TTX_RENDERED 1u      /* as on the Beeb: colours, mosaics (ANSI), code cells as spaces */
+#define TND_TTX_MARKERS  2u      /* each code a marker in its column: its colour, or a reversed letter */
+#define TND_ECHO_US      1000000u   /* an echo that has not come (or not finished) by then never will */
+#define TND_GA_US        300000u    /* the Beeb quiet this long, its keys taken: end of output */
+
+typedef struct {
+   uint8_t  code, got;          /* the VDU code whose parameters are being skipped, and how many so far */
+   bool     disabled;           /* VDU 21 seen: nothing until VDU 6 */
+   bool     utf8;               /* the pound sign as UTF-8 (else Latin-1) */
+   bool     tele;               /* MODE 7 */
+   bool     gfx;                /* MODE 7: a graphics colour code earlier on this line */
+   bool     cr;                 /* a CR that was not followed by LF: a new line before more text */
+   uint8_t  col;                /* characters on the client's line (capped): 0 at its start */
+   uint8_t  exp[TND_LINE_EXP];  /* the keys given to the Beeb whose echo is still to come */
+   uint16_t eh, en;             /* ... the oldest, and how many */
+   uint16_t matched;            /* bytes of the Beeb's output that matched them so far, held back */
+   uint16_t skip;               /* ... matched from a later line: the keys before it (see line_restart) */
+   bool     nl;                 /* a line's echo matched: its new line (CR ... LF) is being dropped */
+   bool     ga_armed;           /* something happened since the last end of output */
+   uint32_t typed_us, out_us;   /* the last key given, the last byte from the Beeb */
+   uint8_t  ttx;                /* TND_TTX_*: spaces, rendered or markers */
+   uint16_t tt[12];             /* MODE 7 rendered or markers: the row's teletext state (telnetd_proto.c) */
+   uint8_t  tsgr;               /* ... the colours the client has, 0xFF unknown */
+   uint8_t  rowcol;             /* ... the column on the Beeb's 40-column row */
+} tnd_line_t;
+
+/* mode is the Beeb's screen MODE as far as it is known (0-7).  ttx_style starts at
+   TND_TTX_SPACES; tnd_line_ttx changes it (shell mode). */
+void   tnd_line_reset(tnd_line_t *s, bool utf8, uint8_t mode);
+void   tnd_line_ttx(tnd_line_t *s, uint8_t ttx_style);
+
+/* The client's line is about to be written by someone else (the shell's edit line):
+   the colours the line translator set are put back to plain.  Bytes, at most 4. */
+size_t tnd_line_plain(tnd_line_t *s, uint8_t *dst);
+
+/* One character as a marker (TND_TTX_MARKERS), as the edit line shows a code typed
+   with Ctrl-V: at most TND_LINE_GLYPH_MAX bytes, one column. */
+size_t tnd_marker(uint8_t c, bool utf8, uint8_t *dst);
+
+/* How many more keys the echo can be waited for: the daemon gives the Beeb no more than
+   this, so that every key it types is matched. */
+size_t tnd_line_room(const tnd_line_t *s);
+
+/* A key has been given to the Beeb (into its keyboard buffer): its echo is expected. */
+void   tnd_line_typed(tnd_line_t *s, uint8_t key, uint32_t now_us);
+
+/* ESCAPE was sent: what was typed ahead is gone, so its echo will not come. */
+void   tnd_line_escape(tnd_line_t *s);
+
+/* One byte the Beeb printed; writes the client's bytes (TND_LINE_OUT_MAX at most).
+   Plain text: printable characters, CR LF for a new line, BEL; the pound sign; a
+   DELETE as BS SP BS.  Everything else - cursor moves, windows, colours, MODE,
+   graphics, teletext control codes (a space), VDU 23 and the parameter bytes of all
+   of them - is dropped.  No 0xFF is ever written. */
+size_t tnd_line_beeb(tnd_line_t *s, uint8_t c, uint32_t now_us, uint8_t *dst);
+
+/* Call regularly: an echo that has stopped coming is given up (what was held back
+   from it is written).  Returns the bytes written (TND_LINE_OUT_MAX at most). */
+size_t tnd_line_tick(tnd_line_t *s, uint32_t now_us, uint8_t *dst);
+
+/* True once each time the Beeb has gone quiet: something happened, nothing has been
+   printed or typed for TND_GA_US, no key is waiting (keys_waiting: the daemon's and
+   the redirect's queues) and no echo is half matched.  The daemon then sends IAC GA
+   if tnd_ga_wanted. */
+bool   tnd_line_ga_due(tnd_line_t *s, uint32_t now_us, bool keys_waiting);
+
+/* ---- the hot key -------------------------------------------------------------
+   Ctrl-\ is a prefix in a terminal session (screen or shell mode): the key after it is
+   a command for the daemon, and Ctrl-\ twice sends one Ctrl-\ (code 28) to the Beeb.
+      Ctrl-\ m   screen mode <-> shell mode
+      Ctrl-\ t   teletext codes rendered <-> markers (line and shell mode)
+      Ctrl-\ Ctrl-\   a Ctrl-\ for the Beeb
+   Anything else after it is dropped. */
+#define TND_HOT_KEY      0x1Cu
+#define TND_HOT_NONE     0u      /* not the hot key: the key as it is */
+#define TND_HOT_SWALLOW  1u      /* taken, nothing to do */
+#define TND_HOT_MODE     2u
+#define TND_HOT_TTX      3u
+#define TND_HOT_LITERAL  4u      /* send TND_HOT_KEY to the Beeb */
+
+uint8_t tnd_hotkey(bool *armed, uint8_t key);
+
+/* ---- shell mode: the Pi's line editor ----------------------------------------
+   A terminal client in shell mode types into an editor on the Pi (readline-like),
+   and the line goes to the Beeb when RETURN is pressed; the Beeb's echo of it is
+   taken out (the line mode matcher) and its output is shown as in line mode.
+
+   Who gets a key.  A line being edited owns every key.  Otherwise a printable key is
+   a probe if the Beeb has been quiet for TND_SH_QUIET_US: it goes to the Beeb at
+   once, and if the Beeb's next output is that same character (OSWORD 0 echoing it:
+   a command line, INPUT) the editor takes over - the echo is dropped, a DELETE takes
+   the key back out of the Beeb's line, and the key starts the edit line.  If the Beeb
+   prints something else, or nothing for TND_SH_PROBE_US, a program took the key (GET,
+   INKEY) and keys go straight to the Beeb until none has been typed for
+   TND_SH_PASS_US.  Keys typed while a probe waits are held and follow its outcome.
+   An editing key (arrows, Home, End, Ctrl-A/E/K/U/W/R, RETURN) at a quiet Beeb opens
+   the editor directly; while the Beeb is busy it goes to the Beeb as screen mode
+   would send it. */
+#define TND_SH_LINE      238u        /* longest line (BASIC's) */
+#define TND_SH_HIST      16u
+#define TND_SH_QUEUE     32u
+#define TND_SH_QUIET_US  100000u
+#define TND_SH_PROBE_US  250000u
+#define TND_SH_PASS_US   500000u
+#define TND_SH_REDRAW_US 30000u     /* the edit line is drawn again once the Beeb has been quiet this long */
+#define TND_SH_CLI_MAX   (TND_LINE_OUT_MAX + 16u * TND_SH_LINE + 64u)   /* client bytes one call writes */
+#define TND_SH_KEYS_MAX  (2u * TND_SH_LINE + 8u)                     /* keys for the Beeb one call gives (a byte
+                                                                       above 127 is two: TND_KEY_LIT and it) */
+
+#define TND_SH_IDLE      0u
+#define TND_SH_PROBE     1u
+#define TND_SH_EDIT      2u
+#define TND_SH_PASS      3u
+
+typedef struct {
+   uint8_t *cli;   size_t ncli;     /* bytes for the client */
+   uint8_t *keys;  size_t nkeys;    /* keys for the Beeb's keyboard buffer */
+   bool     escape;                 /* raise the Beeb's ESCAPE (and drop the keys queued) */
+} tnd_sh_io_t;
+
+typedef struct {
+   tnd_line_t lm;                   /* the Beeb's output, and the echo matcher */
+   uint8_t  state;                  /* TND_SH_* */
+   uint8_t  line[TND_SH_LINE];      /* the edit line, as characters (codes included) */
+   uint16_t len, cur;
+   bool     shown;                  /* the edit line is on the client's screen */
+   uint16_t shown_cur;              /* ... and its cursor is this far into it */
+   uint8_t  probe;                  /* the key sent as the probe */
+   bool     del_echo;               /* the DELETE that took it back: its echo is dropped */
+   uint8_t  queue[TND_SH_QUEUE];    /* keys typed while the probe waits */
+   uint8_t  nq;
+   uint32_t probe_us, key_us;
+   uint8_t  ctrlv, vhi;             /* Ctrl-V and the hex digits after it */
+   uint8_t  hist[TND_SH_HIST][TND_SH_LINE];
+   uint16_t hlen[TND_SH_HIST];
+   uint8_t  hn;                     /* lines in the history, newest at index 0 */
+   int16_t  hpos;                   /* the history line shown, -1 the line being typed */
+   uint8_t  saved[TND_SH_LINE];     /* ... which is kept here meanwhile */
+   uint16_t savedlen;
+   bool     utf8;
+   bool     lit_ok;                 /* set by the daemon: the Beeb takes a byte above 127 behind TND_KEY_LIT */
+   bool     lit_next;               /* the key after TND_KEY_LIT: a character above 127, as it is */
+} tnd_shell_t;
+
+void   tnd_shell_reset(tnd_shell_t *s, bool utf8, uint8_t mode, uint8_t ttx_style);
+
+/* A key from tnd_in (shell mode: tnd_in_t.edit_keys on).  TND_KEY_ESCAPE is passed
+   too: the line goes and io->escape asks the daemon for the Beeb's ESCAPE.  A character above
+   127 comes as TND_KEY_LIT and then it, and goes to the Beeb the same way (io->keys). */
+void   tnd_shell_key(tnd_shell_t *s, uint8_t key, uint32_t now_us, tnd_sh_io_t *io);
+
+/* One byte the Beeb printed. */
+void   tnd_shell_beeb(tnd_shell_t *s, uint8_t c, uint32_t now_us, tnd_sh_io_t *io);
+
+/* Call on every pass: a probe or a passthrough that has run its time, an echo given
+   up, and the edit line drawn again after the Beeb's output. */
+void   tnd_shell_tick(tnd_shell_t *s, uint32_t now_us, tnd_sh_io_t *io);
+
+/* Draw the edit line again (Ctrl-L, or after the daemon wrote to the client). */
+void   tnd_shell_redraw(tnd_shell_t *s, tnd_sh_io_t *io);
+
+/* The keyboard buffer code that gives a program the character c with the MOS's
+   default settings (*FX221-228, measured on MOS 1.20): &80-&8A come from SHIFT and
+   the function keys (&90-&9A), &90-&9A from CTRL and them (&A0-&AA); &D0-&DA,
+   &E0-&EA and &F0-&FA are themselves.  0 for one no key gives (&8B-&8F, &9B-&9F,
+   &A0-&CF ...): it cannot be typed into a line, only made with CHR$. */
+uint8_t tnd_key_for_char(uint8_t c);
 
 /* ---- a session that has stopped moving -------------------------------------- */
 
