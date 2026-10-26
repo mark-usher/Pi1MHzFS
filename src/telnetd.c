@@ -846,14 +846,19 @@ static void tline_byte(uint8_t c)
 
 /* A teletype is shown the Beeb's line (usually its prompt, and what has been typed), so it does not
    look dead; no key is sent to the Beeb for it. */
-static void o_beeb_line(void)
+static size_t o_beeb_line(void)
 {
-   char cl[TND_COLS_MAX + 1u];
+   char   cl[TND_COLS_MAX + 1u];
+   size_t n;
 
-   if (g_tline_ok)
+   if (g_tline_ok) {
       o_put(g_tline, g_tlen);
-   else if (tnd_out_cursor_line(&g_out, cl, sizeof cl) != 0u)
+      return g_tlen;
+   }
+   n = tnd_out_cursor_line(&g_out, cl, sizeof cl);
+   if (n != 0u)
       o_str(cl);
+   return n;
 }
 
 static void beeb_follow(uint8_t c)
@@ -932,6 +937,13 @@ static bool ansi_now(void)
    return g_ansi_cfg && !g_in.raw && g_sm == TND_MODE_SCREEN;
 }
 
+/* Shell mode on a new line: the Beeb's line again (usually its prompt), so the edit line comes after it. */
+static void shell_prompt(void)
+{
+   size_t n = o_beeb_line();
+   g_sh.lm.col = (uint8_t)(n > 255u ? 255u : n);
+}
+
 /* After the banners (at connect, or after the login): what the session's mode starts with. */
 static void mode_start(void)
 {
@@ -944,6 +956,7 @@ static void mode_start(void)
    if (g_sm == TND_MODE_SHELL) {
       o_str(td_name());
       o_str(" telnet - shell mode (Ctrl-\\ m: screen mode)\r\n");
+      shell_prompt();
    }
 }
 
@@ -1018,6 +1031,7 @@ static void session_enter(uint8_t m)
       o_str("\r\n");
    g_out.tek_on = false;
    g_ansi = ansi_now();
+   shell_prompt();
 }
 
 static void session_decide(uint32_t now_us)
