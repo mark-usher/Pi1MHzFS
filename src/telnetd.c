@@ -154,9 +154,10 @@ static uint32_t g_kgen_seen;                  /* the reports already used */
 #define KEYS_HUNG_US   5000000u                  /* keys waiting this long, none taken: "not taking keys" */
 #define SILENT_KEY_US  250000u                   /* a key taken, then no character drawn this long: read the screen */
 #define SILENT_SCAN_US 1000000u                  /* ... at most this often */
-/* A screen read only to check the picture the Pi already has (merged) waits until nobody has typed for this
-   long: the Beeb reads keys only after it, and in MODE 0 it took over 3 s (each of 2560 characters
-   recognised from the bitmap), so keys typed as a session starts did not show for seconds. */
+/* With telnetd_debug=1 only: the session's first screen read, a check of the picture the Pi already has
+   (merged), waits until nobody has typed for this long.  The Beeb reads keys only after it; with a ROM
+   before build 24 a MODE 0 read took over 3 s, and keys typed as the session started waited for it.
+   Build 24 reads the screen fast, so by default the read goes at once, as upstream has it. */
 #define SCAN_IDLE_US   2000000u
 static uint32_t g_typed_us;                      /* the last key typed, or the screen first drawn */
 static bool     g_scan_wait;                     /* the screen read is the session's first check: it may wait */
@@ -655,6 +656,8 @@ static void sh_io(tnd_sh_io_t *io)
    io->nkeys = 0u;
    io->escape = false;
    g_sh.lit_ok = serial_redirect_beeb->rom;
+   if (!g_sh.shown)                              /* the width the edit line is drawn at (NAWS): a resize */
+      g_sh.cols = g_in.win_cols;                 /* takes the shown line off at the width it was drawn at */
 }
 
 static void session_enter(uint8_t m);
@@ -1760,7 +1763,7 @@ static void telnetd_poll(uint32_t now_us, bool beeb_attached)
    }
    if (g_scan != SCAN_NONE && g_ansi && g_stage == S_LIVE && !naws_wait && g_pcb != NULL && beeb_attached
        && serial_redirect_beeb->rom && g_khead == g_ktail
-       && (g_scan != SCAN_MERGE || !g_scan_wait || (now_us - g_typed_us) >= SCAN_IDLE_US)) {
+       && (!g_debug || g_scan != SCAN_MERGE || !g_scan_wait || (now_us - g_typed_us) >= SCAN_IDLE_US)) {
       g_scan_wait = false;
       if (g_scan == SCAN_MERGE)
          tnd_out_scan_merge(&g_out);

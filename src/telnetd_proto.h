@@ -515,6 +515,8 @@ typedef struct {
    uint16_t savedlen;
    bool     utf8;
    bool     lit_ok;                 /* set by the daemon: the Beeb takes a byte above 127 behind TND_KEY_LIT */
+   uint16_t cols;                   /* set by the daemon: the terminal's width (NAWS), 0 if not known */
+   uint16_t scol;                   /* the terminal's column the edit line starts at (when cols is known) */
    bool     lit_next;               /* the key after TND_KEY_LIT: a character above 127, as it is */
 } tnd_shell_t;
 

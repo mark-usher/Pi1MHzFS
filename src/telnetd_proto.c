@@ -3345,12 +3345,48 @@ void tnd_shell_reset(tnd_shell_t *s, bool utf8, uint8_t mode, uint8_t ttx_style)
    s->hpos = -1;
 }
 
+/* From offset a to offset b of the edit line on the terminal.  A line longer than the space after the
+   prompt wraps on the terminal itself, which a move along the row (ESC [ n D) cannot follow: with the
+   terminal's width known (NAWS), the move is by rows and columns - up, or down by line feeds (which
+   scroll at the bottom, for a row the line has just reached), then to the column from the row's start.
+   at_end: the cursor has just written offset a's character before: one in the last column leaves the
+   terminal at that column of that row (its wrap waits for the next character). */
+static void sh_goto(const tnd_shell_t *s, tnd_sh_io_t *io, unsigned a, unsigned b, bool at_end)
+{
+   unsigned w = s->cols, pa = s->scol + a, pb = s->scol + b, ra, rb, cb;
+
+   if (w == 0u) {                               /* the width not known: along the row */
+      if (b < a)
+         io_move(io, a - b, 'D');
+      else
+         io_move(io, b - a, 'C');
+      return;
+   }
+   ra = (at_end && a != 0u && pa % w == 0u) ? (pa - 1u) / w : pa / w;
+   rb = pb / w;
+   cb = pb % w;
+   if (ra == rb && !(at_end && a != 0u && pa % w == 0u)) {
+      if (b < a)                                /* on the same row: along it */
+         io_move(io, a - b, 'D');
+      else
+         io_move(io, b - a, 'C');
+      return;
+   }
+   if (rb < ra)
+      io_move(io, ra - rb, 'A');
+   else
+      for (unsigned i = ra; i < rb; i++)
+         io_str(io, "\n");
+   io_str(io, "\r");
+   io_move(io, cb, 'C');
+}
+
 static void sh_hide(tnd_shell_t *s, tnd_sh_io_t *io)
 {
    if (!s->shown)
       return;
-   io_move(io, s->shown_cur, 'D');
-   io_str(io, "\x1b[K");
+   sh_goto(s, io, s->shown_cur, 0u, false);
+   io_str(io, s->cols != 0u ? "\x1b[J" : "\x1b[K");   /* (wrapped: the rows below it too) */
    s->shown = false;
 }
 
@@ -3363,8 +3399,9 @@ static void sh_draw(tnd_shell_t *s, tnd_sh_io_t *io)
 
 static void sh_show(tnd_shell_t *s, tnd_sh_io_t *io)
 {
+   s->scol = (uint16_t)(s->cols != 0u ? (unsigned)s->lm.col % (unsigned)s->cols : 0u);   /* after the Beeb's prompt */
    sh_draw(s, io);
-   io_move(io, (unsigned)(s->len - s->cur), 'D');
+   sh_goto(s, io, s->len, s->cur, true);
    s->shown = true;
    s->shown_cur = s->cur;
 }
@@ -3706,7 +3743,7 @@ void tnd_shell_key(tnd_shell_t *s, uint8_t key, uint32_t now_us, tnd_sh_io_t *io
    }
    if (key == TND_KEY_ESCAPE) {                 /* the line goes, the Beeb gets ESCAPE */
       if (s->shown) {
-         io_move(io, (unsigned)(s->len - s->shown_cur), 'C');
+         sh_goto(s, io, s->shown_cur, s->len, false);
          s->shown = false;
       }
       s->len = s->cur = 0u;

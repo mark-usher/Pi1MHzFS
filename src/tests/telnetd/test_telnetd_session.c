@@ -423,9 +423,7 @@ int main(int argc, char **argv)
    mark_at(c);
    tick(1200000u);
    CHECK(got_has(c, "\x1b[2J") || got_has(c, "\x1b[H"), "the terminal cleared and drawn");
-   CHECK(!keys_have("\xff"), "the check of the picture waits for a pause in the typing ...");
-   tick(2100000u);
-   CHECK(keys_have("\xff"), "... then the ROM is asked for the screen (SCAN_KEY)");
+   CHECK(keys_have("\xff"), "the ROM asked for the screen (SCAN_KEY)");
 
    step("the Beeb prints, the client types");
    mark_at(c);
