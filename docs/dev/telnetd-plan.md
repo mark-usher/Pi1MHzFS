@@ -1054,3 +1054,17 @@ the focus.
 
 Not yet: Tube transfers in the harness (no disc there), and BREAK with the co-processor
 (F12 above was without a disc transfer running; a power cycle is not the same reset).
+
+### Rebased on upstream master, with the five fix PRs (2026-10-28)
+
+The branch is rebased onto upstream master (the screen redirector's copy cursor and the
+TinyUSB update): the merge of the line and shell mode work is made again on the new master
+with the same tree plus upstream's two commits, and the later commits are replayed on it
+unchanged. The five open fix PRs (Windows telnet's code page 850, SHIFT and CTRL on the
+soft and cursor keys, a line-mode client's line shown once, MODE 0-6 codes 128-255, the
+copy cursor) are applied on top. Most of their code was already here; what they add is
+their tests and the wording in the user guide (the copy cursor PR is already here in full).
+The harness's fake Pi stubs the redirector's two new copy-cursor calls. Unit tests (803,975
+protocol, 68 session checks), the harness (29 checks in 50 s, 39 with the second processor
+in 166 s) and, on the bench with this branch's kernel and no login set, the markers and
+shell mode run (19 checks) and the Tube disc run (13 checks) all pass.
