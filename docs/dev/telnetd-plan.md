@@ -896,8 +896,9 @@ unchanged; the Pi side only.
 ## 17. Plain line mode and shell mode (port of telnetd-linemode, 2026-10-26)
 
 **STATUS: on the bench (Model B with a 6502 second processor, the daemon on upstream
-master with the font mode work), host-tested (803,961 protocol checks, 62 session
-checks).**
+master with the font mode work), markers mode checked there too (2026-10-28),
+host-tested (803,962 protocol checks, 63 session checks), and in the emulator harness
+with and without a second processor.**
 
 The branch `telnetd-linemode` (14 Oct, `fa67410..e4da19a4`, never pushed) built line
 mode and shell mode on the daemon as it was then, before NAWS, TTYPE, the login, the
@@ -948,13 +949,51 @@ again on today's daemon, then put on upstream master (dp111's rework after PR #4
 | The probe over Wi-Fi | the echo comes well inside `TND_SH_PROBE_US` |
 
 | plink (PuTTY's telnet backend, ConPTY): login, Ctrl-\ m, typing, RETURN, Ctrl-\ m back | negotiation and the hot key as designed (screen mode); plink, a console program, sends nothing for Home, the arrows or Delete - PuTTY's window does that, so those are on the manual list |
+| Debian telnet, shell mode, `telnetd_teletext` unset (rendered), one session (2026-10-28): MODE 7; `PRINT "` with Ctrl-V 81, 84, 8D, 9D among text | each code's marker in the edit line as soon as its second digit is typed (after the fix below); the edit line one cell per marker, the cursor at its end; the output rendered (red, blue, the codes' cells as spaces) |
+| ... Ctrl-\ t; Up, RETURN | the status says `(shell mode, teletext markers)`; the output as the edit line had it, each code in its own cell |
+| ... a program line with Ctrl-V 82, 93, 88; LIST; RUN | LIST keeps the columns: a green block, a shaded yellow block, then `abc` and the closing quote as sextants (after a graphics code, as the Beeb shows them), a reversed F |
+| ... the window narrowed to 30 columns (NAWS): a 39-cell line with ten markers across the wrap; Home, Right x8; Ctrl-V 84 inserted mid-line; Backspace; RETURN | laid out across the rows, the cursor right at each step (a marker is one cell, in UTF-8 and Latin-1 alike) |
+| ... Ctrl-\ t back; Ctrl-\ m | `(shell mode, teletext rendered)`; screen mode |
+| `telnetd_teletext=markers` in Pi1MHz.cfg (the file backed up first, put back afterwards), a new session, Ctrl-\ m | shell mode starts in markers (status, and a program's codes as markers); Ctrl-\ t gives rendered |
+| nc-like raw client with `telnetd_teletext=markers`: MODE 7, codes in a PRINT and in a program, LIST | spaces, no escape codes, no markers (markers are for shell mode only); LIST as text |
 
 The emulator harness (`tools/telnetd-emu`) now runs the firmware's own Pi code
 (`serial_redirect.c`, `telnetd.c`, `telnetd_proto.c`) against MOS 1.20, BASIC 2 and
-the TelnetD ROM on its 6502: 20 checks, among them a 20-column window with a wrapped
-edit line, all pass. `wrap_check.py` drives the shell editor alone through random
+the TelnetD ROM on its 6502: 20 checks at first (more since, below), among them a
+20-column window with a wrapped edit line, all pass. `wrap_check.py` drives the shell editor alone through random
 edits in 13- to 80-column terminals: none wrong (the old row-only moves failed 109
 checks of 60 runs).
 
+### Markers on the bench, a second processor in the harness (2026-10-28)
+
+Fixed:
+
+- **A code typed with Ctrl-V showed only with the next key.** `sh_edit` put the byte
+  into the line after the second hex digit and returned without drawing the line again
+  (`wrap_check.py`, given Ctrl-V among its edits, found it at once: the last marker of
+  a line was missing). It is drawn at once now; a protocol check covers it.
+- **The status page did not say how teletext codes are shown.** The Telnetd row now
+  says `(shell mode, teletext rendered)` or `(shell mode, teletext markers)`; session
+  checks follow Ctrl-\ t both ways.
+- **The harness's second rig shared the first one's Pi.** `run.py` built fakepi for
+  each `Rig` under the same path, and `dlopen` returns the library already loaded for a
+  path it has, so the `telnetd_linemode=on` rig ran on the first rig's Pi. Each build
+  has its own name now.
+
+Not a bug: markers are one cell each (a block or a reversed letter), so the edit line's
+wrap and cursor arithmetic (one column per character) holds for them; the bench's
+30-column run and `wrap_check.py` agree.
+
+The harness (`tools/telnetd-emu`) has a 6502 second processor now (`tube.py`, `--tube`):
+the Tube ULA as b-em has it, a 65C02 with the client ROM, the Tube host code from the
+1770 DFS 2.26 as on the bench, BASIC 2 copied into the parasite at power-on and HiBASIC 4
+with `*FX142,5` when an image is found. Every check runs with BASIC in the parasite as
+well, and some are added: the Tube found, the greeting, PAGE and HIMEM, a 125-character
+line in screen and shell mode, Ctrl-C in screen mode, and HiBASIC's (`PRINT 2+2`, a long
+line, a GET program, Ctrl-C). Without the co-processor: 29 checks in
+about 75 s; with it (and HiBASIC 4): 39 in under 3 minutes. All pass. Nothing in the daemon needed
+changing for the second processor: its keys and the Beeb's output go through the host's
+MOS either way, and the stub at &FCCC stays hooked in.
+
 Not yet: PuTTY's own window (its keys: Home, End, Delete, the arrows, F12, Ctrl-\),
-`telnetd_teletext=markers` on the hardware, and a second processor in the harness.
+and Tube transfers from a filing system in the harness (no disc there).

@@ -8,7 +8,8 @@ and FRED (&FC00-&FCFF), which is the Pi's: fakepi.c with the firmware's own stub
 write goes to the Pi (stored, and the stub's callback for it), the Pi's nIRQ joins the
 VIA's, and the Pi's main loop runs every emulated millisecond.  The rest of SHEILA -
 CRTC, video ULA, the 6850, the user VIA, ADC - reads as idle and ignores writes: the
-MOS writes the screen into RAM as usual, and nothing here draws it.
+MOS writes the screen into RAM as usual, and nothing here draws it.  The Tube (&FEE0-&FEFF)
+is tube.py's when a second processor is given, else absent.
 
 Time is the 6502's: two cycles per microsecond.  Nothing runs in real time.
 """
@@ -152,8 +153,10 @@ class Via:
 class Beeb:
     POLL_CYCLES = 2000                               # the Pi's main loop: every millisecond
 
-    def __init__(self, mos, roms, pi):
-        """mos: 16K MOS image; roms: {bank: 16K image}; pi: the fakepi library (run.py's Pi)."""
+    def __init__(self, mos, roms, pi, para=None):
+        """mos: 16K MOS image; roms: {bank: 16K image}; pi: the fakepi library (run.py's Pi);
+        para: a second processor on the Tube (tube.py's Parasite), or None."""
+        self.para = para
         self.mem = bytearray(0x10000)
         self.mem[0xC000:0x10000] = mos
         self.banks = {b: bytes(r) for b, r in roms.items()}
@@ -211,7 +214,7 @@ class Beeb:
         if 0xFE08 <= a < 0xFE10:
             return 0x02                              # 6850: nothing received, transmit register empty
         if 0xFEE0 <= a < 0xFF00:
-            return 0                                 # no Tube
+            return self.para.tube.host_read(a & 7) if self.para else 0    # the Tube, or none
         return 0xFE
 
     def io_wr(self, a, v):
@@ -222,6 +225,8 @@ class Beeb:
             self.page(v)
         elif 0xFE40 <= a < 0xFE60:
             self.via.write(a & 15, v)
+        elif 0xFEE0 <= a < 0xFF00 and self.para:
+            self.para.tube.host_write(a & 7, v)
 
     # ---- the CPU ----
     def push(self, v):
@@ -233,7 +238,7 @@ class Beeb:
         return self.mem[0x100 + self.s]
 
     def irq_line(self):
-        return self.via.irq() or self.nirq
+        return self.via.irq() or self.nirq or (self.para is not None and self.para.tube.hirq)
 
     def interrupt(self, vector, brk):
         self.push(self.pc >> 8)
@@ -250,6 +255,7 @@ class Beeb:
         wr = self.wr
         via = self.via
         hooks = self.hooks
+        para = self.para
         while self.cycles < end:
             if self.cycles >= self.next_poll:
                 self.next_poll = self.cycles + self.POLL_CYCLES
@@ -267,6 +273,8 @@ class Beeb:
             c = CYCLES[op]
             self.cycles += c
             via.tick(c / 2.0)
+            if para is not None:                     # the second processor up to the same time
+                para.run_to(self.cycles)
 
     @property
     def us(self):

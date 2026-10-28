@@ -5,11 +5,14 @@ and src/telnetd_proto.c - built into a shared library with fakepi.c.  The Beeb b
 stub in, as on the bench; a fake TCP client connects to the daemon.
 
     python3 run.py --roms DIR                 the transcript checks (exit 1 on a failure)
+    python3 run.py --roms DIR --tube          ... with a 6502 second processor (tube.py), BASIC in it
     python3 run.py --roms DIR --listen 2323   a live session on 127.0.0.1:2323 (nc, telnet, PuTTY)
-           [--cfg key=value ...]              more Pi1MHz.cfg settings (telnetd_linemode=shell, ...)
+           [--tube] [--cfg key=value ...]     more Pi1MHz.cfg settings (telnetd_linemode=shell, ...)
+           [--debug]                          every Tube register access printed
 
 DIR holds os12.rom (MOS 1.20) and basic2.rom (BASIC 2), searched recursively (b-em's roms folder works);
-or set TELNETD_EMU_ROMS.  The TelnetD ROM is the repository's (firmware/Pi1MHz/telnetd.rom).  Linux or WSL
+several folders separated by ':'; or set TELNETD_EMU_ROMS.  --tube needs dfs226.rom (its Tube host code)
+and 6502tube.rom (the client ROM) as well, and uses hibasic.rom (HiBASIC 4) if there is one.  The TelnetD ROM is the repository's (firmware/Pi1MHz/telnetd.rom).  Linux or WSL
 with Python 3 and gcc.  See README.md.
 """
 import argparse
@@ -30,6 +33,11 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 from beeb import Beeb                          # noqa: E402
 from beebterm import Screen                    # noqa: E402
+from tube import Parasite                      # noqa: E402
+
+TUBE_HOST = "dfs226.rom"                       # Acorn 1770 DFS 2.26: TUBE HOST 2.30, the bench's filing system
+TUBE_CLIENT = "6502tube.rom"                   # the 6502 second processor's client ROM (2K)
+HIBASIC = "hibasic.rom"                        # HiBASIC 4, if a --roms folder has it: more checks with --tube
 
 FIRMWARE = ["serial_redirect.c", "telnetd.c", "telnetd_proto.c", "net_telnet.c",
             os.path.join("lib", "textparse.c"), os.path.join("wifi", "lwip_util.c")]
@@ -37,19 +45,28 @@ NAWS = lambda c, r: bytes([255, 250, 31, 0, c, 0, r, 255, 240])   # noqa: E731
 BLUE_MARK = b"\x1b[34m\xe2\x96\x88"            # &84 as a marker: a solid block in blue
 
 
-def find_rom(root, name):
-    for d, _, files in os.walk(root):
-        for f in files:
-            if f.lower() == name:
-                return os.path.join(d, f)
-    raise SystemExit(f"{name} not found under {root}")
+def find_rom(roots, name, needed=True):
+    """name (lower case) under any of the folders in roots (separated by os.pathsep), searched recursively."""
+    for root in roots.split(os.pathsep):
+        for d, _, files in os.walk(root):
+            for f in files:
+                if f.lower() == name:
+                    return os.path.join(d, f)
+    if needed:
+        raise SystemExit(f"{name} not found under {roots}")
+    return None
 
 
 class Pi:
     """fakepi.c and the firmware's files, built here (gcc) and loaded."""
 
+    built = 0
+
     def __init__(self):
-        out = os.path.join(tempfile.gettempdir(), "telnetd-emu-fakepi-%d.so" % os.getpid())
+        # a name of its own for each: the same path would give the library already loaded (dlopen), and
+        # two rigs would share one Pi
+        Pi.built += 1
+        out = os.path.join(tempfile.gettempdir(), "telnetd-emu-fakepi-%d-%d.so" % (os.getpid(), Pi.built))
         cmd = ["gcc", "-std=gnu2x", "-O2", "-Wall", "-Wextra", "-shared", "-fPIC", "-funsigned-char",
                "-I" + os.path.join(SRC, "tests", "telnetd", "session"), "-I" + SRC, "-I" + os.path.join(SRC, "wifi"),
                "-o", out, os.path.join(HERE, "fakepi.c")] + [os.path.join(SRC, f) for f in FIRMWARE]
@@ -95,7 +112,9 @@ class Pi:
 class Rig:
     """The emulated Beeb and the Pi, and one client at a time."""
 
-    def __init__(self, roms, cfg):
+    def __init__(self, roms, cfg, tube=False, debug=False):
+        """tube: a 6502 second processor, with the 1770 DFS 2.26 (its Tube host code) in bank 14 for the
+        host, as on the bench; BASIC is then copied over and runs in the parasite."""
         self.pi = Pi()
         for k, v in cfg.items():
             self.pi.cfg(k, v)
@@ -103,7 +122,17 @@ class Rig:
         mos = open(find_rom(roms, "os12.rom"), "rb").read()
         basic = open(find_rom(roms, "basic2.rom"), "rb").read()
         tdrom = open(os.path.join(ROOT, "firmware", "Pi1MHz", "telnetd.rom"), "rb").read()
-        self.beeb = Beeb(mos, {15: basic, 1: tdrom}, self.pi)
+        banks = {15: basic, 1: tdrom}
+        self.para = None
+        self.hibasic = False
+        if tube:
+            banks[14] = open(find_rom(roms, TUBE_HOST), "rb").read()
+            self.para = Parasite(open(find_rom(roms, TUBE_CLIENT), "rb").read(), debug)
+            hib = find_rom(roms, HIBASIC, needed=False)
+            if hib:                                    # in bank 5, as on the bench (*FX142,5)
+                banks[5] = open(hib, "rb").read()
+                self.hibasic = True
+        self.beeb = Beeb(mos, banks, self.pi, self.para)
         self.out = b""
         self.screen = None
 
@@ -179,17 +208,40 @@ def show(rig, title, last=8):
         print("     |%s" % r)
 
 
-def checks(roms):
-    print("== screen mode: a telnet client")
-    rig = Rig(roms, {"telnetd_port": 23, "telnetd_login": 0, "telnetd_raw_port": 2323})
+LONG = "PRINT " + "+".join(["1"] * 60)          # 125 characters: wraps on the Beeb and the terminal
+
+
+def checks(roms, tube=False, debug=False):
+    print("== screen mode: a telnet client" + (", a 6502 second processor on the Tube" if tube else ""))
+    rig = Rig(roms, {"telnetd_port": 23, "telnetd_login": 0, "telnetd_raw_port": 2323}, tube, debug)
     rig.boot()
     insv = rig.beeb.mem[0x22A] | rig.beeb.mem[0x22B] << 8
     check("the ROM hooked the stub in (INSV at &%04X, in FRED)" % insv, 0xFC00 <= insv < 0xFD00, "INSV &%04X" % insv)
+    if tube:
+        p = rig.para
+        check("the MOS found the Tube (&27A = &%02X), the parasite runs from RAM" % rig.beeb.mem[0x27A],
+              rig.beeb.mem[0x27A] == 0xFF and not p.rom_in,
+              "&27A %02X, rom_in %s, pc %04X" % (rig.beeb.mem[0x27A], p.rom_in, p.pc))
+        check("BASIC copied into the parasite (&8000)", p.mem[0x8009:0x800E] == b"BASIC", repr(bytes(p.mem[0x8000:0x8010])))
     rig.connect()
     check("the greeting and the screen", b"telnet" in rig.out, repr(rig.out[:200]))
+    if tube:
+        show(rig, "the Beeb's screen, read at the connect", 6)
+        check("the boot greeting has the 6502 second processor", "Acorn TUBE 6502 64K" in rig.text(), rig.text())
     rig.type("PRINT 2+2\r")
     show(rig, "PRINT 2+2")
     check("PRINT 2+2 typed and answered", ">PRINT 2+2" in rig.text() and "4" in rig.text(), rig.text())
+    if tube:
+        rig.type("PRINT ~PAGE,~HIMEM\r")
+        check("BASIC runs in the parasite: PAGE &800, HIMEM &8000", "       800      8000" in rig.text(), rig.text())
+    rig.type(LONG + "\r", per_key_ms=20, after_ms=1200)
+    check("screen mode: a long line (%d characters) typed and answered" % len(LONG), "        60" in rig.text(),
+          rig.text())
+    rig.type("30 GOTO 30\r", per_key_ms=20)
+    rig.type("RUN\r", per_key_ms=40, after_ms=500)
+    rig.send("\x03", after_ms=1500)
+    check("screen mode: Ctrl-C (ESCAPE) stops a loop", "Escape at line 30" in rig.text(), rig.text())
+    rig.type("NEW\r", after_ms=500)
     rig.type("MODE 7\r", after_ms=800)
     rig.type('PRINT CHR$129;"RED"\r')
     check("MODE 7's red as ANSI", b"\x1b[31m" in rig.out or b"31m" in rig.out, repr(rig.out[-200:]))
@@ -214,6 +266,12 @@ def checks(roms):
     show(rig, "a GET program, Y N Q")
     t = rig.text()
     check("a GET program gets single keys", "GOT Y" in t and "GOT N" in t and "GOT Q" in t, t)
+    before = rig.text().count(LONG[:30])
+    rig.type(LONG, per_key_ms=20, after_ms=300)
+    rig.send("\r", after_ms=1500)
+    t = rig.text()
+    check("shell mode: a long line typed, shown once and answered", t.count(LONG[:30]) == before + 1
+          and "        60" in t[t.rfind(LONG[-20:]):], t)
     rig.type("MODE 7\r", per_key_ms=40, after_ms=800)
     rig.type('PRINT "', per_key_ms=40, after_ms=100)
     rig.send("\x16" "81", after_ms=100)
@@ -307,7 +365,7 @@ def checks(roms):
     rig.pi.cfg("telnetd_teletext", "rendered")
 
     print("== telnetd_linemode=on: no negotiation")
-    rig2 = Rig(roms, {"telnetd_port": 23, "telnetd_login": 0, "telnetd_linemode": "on"})
+    rig2 = Rig(roms, {"telnetd_port": 23, "telnetd_login": 0, "telnetd_linemode": "on"}, tube, debug)
     rig2.boot()
     rig2.connect(telnet=False)
     check("nothing negotiated (no IAC)", b"\xff" not in rig2.out, repr(rig2.out[:80]))
@@ -322,6 +380,42 @@ def checks(roms):
     check("bytes as they are, the Beeb's echo too", b"PRINT 7" in rig.out and b"7" in rig.out, repr(rig.out))
     rig.close()
 
+    if tube and rig.hibasic:
+        print("== HiBASIC 4 in the parasite (*FX142,5, as on the bench)")
+        rig.connect()
+        rig.type("*FX142,5\r", after_ms=2500)
+        p = rig.para
+        check("HiBASIC copied into the parasite (&B800)", p.mem[0xB809:0xB80E] == b"BASIC", repr(bytes(p.mem[0xB800:0xB810])))
+        rig.type("PRINT ~PAGE,~HIMEM\r")
+        check("HiBASIC runs: PAGE &800, HIMEM &B800", "       800      B800" in rig.text(), rig.text())
+        rig.send("\x1cm")
+        rig.type("PRINT 2+2", per_key_ms=40, after_ms=300)
+        rig.out = b""
+        rig.send("\r", after_ms=1000)
+        check("shell mode: PRINT 2+2", b"         4\r\n>" in rig.out, repr(rig.out))
+        before = rig.text().count(LONG[:30])
+        rig.type(LONG, per_key_ms=20, after_ms=300)
+        rig.send("\r", after_ms=1500)
+        t = rig.text()
+        check("shell mode: a long line, shown once and answered", t.count(LONG[:30]) == before + 1
+              and "        60" in t[t.rfind(LONG[-20:]):], t)
+        rig.type('10 A$=GET$:PRINT "GOT ";A$:IF A$<>"Q" GOTO 10\r', per_key_ms=20)
+        rig.type("RUN\r", per_key_ms=40, after_ms=800)
+        for k in "YNQ":
+            rig.send(k, after_ms=600)
+        show(rig, "HiBASIC: a GET program, Y N Q", 5)
+        t = rig.text()
+        check("shell mode: a GET program gets single keys", t.count("GOT Y") and "GOT N" in t and "GOT Q" in t
+              and t.rstrip().endswith(">"), t)
+        rig.type("NEW\r", per_key_ms=40)
+        rig.type("20 GOTO 20\r", per_key_ms=20)
+        rig.type("RUN\r", per_key_ms=40, after_ms=500)
+        rig.send("\x03", after_ms=1500)
+        check("shell mode: Ctrl-C stops a loop", "Escape at line 20" in rig.text(), rig.text())
+        rig.send("\x1cm", after_ms=1500)
+        rig.type("NEW\r")
+        rig.close()
+
     bad = [n for n, ok in results if not ok]
     print("\n%d checks, %d failed" % (len(results), len(bad)))
     for n in bad:
@@ -331,8 +425,8 @@ def checks(roms):
 
 # ---- a live session ----------------------------------------------------------------------------------------
 
-def listen(roms, port, cfg):
-    rig = Rig(roms, cfg)
+def listen(roms, port, cfg, tube=False, debug=False):
+    rig = Rig(roms, cfg, tube, debug)
     rig.boot()
     srv = socket.socket()
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -366,6 +460,8 @@ def main():
     ap.add_argument("--roms", default=os.environ.get("TELNETD_EMU_ROMS"))
     ap.add_argument("--listen", type=int)
     ap.add_argument("--cfg", action="append", default=[])
+    ap.add_argument("--tube", action="store_true", help="a 6502 second processor on the Tube")
+    ap.add_argument("--debug", action="store_true", help="print every Tube register access")
     a = ap.parse_args()
     if not a.roms:
         raise SystemExit("--roms DIR (or TELNETD_EMU_ROMS): a folder with os12.rom and basic2.rom")
@@ -374,11 +470,11 @@ def main():
         for kv in a.cfg:
             k, v = kv.split("=", 1)
             cfg[k] = v
-        listen(a.roms, a.listen, cfg)
+        listen(a.roms, a.listen, cfg, a.tube, a.debug)
         return 0
-    t0 = time.time()
-    rc = checks(a.roms)
-    print("%.0f s" % (time.time() - t0))
+    t0 = time.monotonic()
+    rc = checks(a.roms, a.tube, a.debug)
+    print("%.0f s" % (time.monotonic() - t0))
     return rc
 
 

@@ -598,8 +598,12 @@ shell mode:
   Concealed text is shown, and graphics characters after a graphics code are sextants.
 
 The shell's edit line always shows codes you type with Ctrl-V as markers, because
-there is nothing there for them to colour. `nc` and other raw clients (plain line mode)
-always get spaces, with no escape codes.
+there is nothing there for them to colour; a code shows as soon as its second hex digit
+is typed. A marker takes one column, as the code does on the Beeb, so a line with
+markers wraps and is edited in a narrow window as any other. `nc` and other raw clients
+(plain line mode) always get spaces, with no escape codes, whatever `telnetd_teletext`
+says. Ctrl-\ t changes what comes next; what is already on the screen stays as it was
+drawn. The Telnetd row of `/status` says which way a shell-mode session has it.
 
 ## Things to know
 
@@ -851,5 +855,6 @@ nowhere else, and keep telnet to a network you trust.
 | `telnetd_debug` | `0` | `1` shows TelnetD's diagnostics on the status page (keys waiting, the MODE it follows and why it last changed, the TCP state). Without it the status shows the port, the sessions and, only when it happens, BBC NOT TAKING KEYS. |
 
 `/status` on the web interface has a **Telnetd** row (the port, whether a
-session is live, who from) and the **Serial** row says `hooked (telnet)`
+session is live, who from, and the mode: `(line mode)`, or in shell mode
+`(shell mode, teletext rendered)` or `(shell mode, teletext markers)`) and the **Serial** row says `hooked (telnet)`
 while helper 20 is in.
