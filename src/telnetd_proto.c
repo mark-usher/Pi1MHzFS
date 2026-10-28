@@ -2734,7 +2734,7 @@ size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX
       s->hlx = s->cx;
       s->hly = s->cy;
    }
-   if (n != 0u || shown != s->parked) {
+   if (n != 0u || shown != s->parked || (shown && keys)) {   /* (a key moves the cursor, the block stays) */
       n += put_finish(s, dst + n);
       s->tsgr = s->coloured ? 0xFFu : TTX_SGR_PLAIN;
       if (shown)                                 /* the flashing cursor on the copy cursor */
