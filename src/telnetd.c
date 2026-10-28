@@ -135,6 +135,7 @@ static const char      k_palette[] =
 static bool            g_debug;               /* telnetd_debug=1: the diagnostics on the status page */
 static bool            g_utf8 = true;
 static bool            g_copy = true;         /* show the copy cursor */
+static bool            g_alt;                 /* the terminal is on its alternate screen (screen mode) */
 
 /* With the ROM (serial_redirect_beeb->rom) the Beeb tells each cursor key, COPY or RETURN a program takes from its keyboard
    buffer (serial_redirect_beeb->key_gen): the ones sent wait here and move the copy cursor only when taken,
@@ -435,6 +436,7 @@ static void session_reset(void)
    g_silent_wait = false;
    g_scan_keys = 0u;
    g_scan = SCAN_NONE;
+   g_alt = false;
    memset(g_user, 0, sizeof g_user);             /* the login typed, not kept after the session */
    memset(g_line, 0, sizeof g_line);
 }
@@ -947,6 +949,18 @@ static void shell_prompt(void)
    g_sh.lm.col = (uint8_t)(n > 255u ? 255u : n);
 }
 
+/* Screen mode is drawn on the terminal's alternate screen, as a full-screen program is: its
+   rows do not go into the terminal's scrollback, and shell mode and the greeting stay on the
+   normal screen, shown again when screen mode ends.  (A client that drops the connection
+   leaves its terminal there, as when such a program is cut off.) */
+static void alt_screen(bool on)
+{
+   if (on == g_alt || (on && !g_ansi))
+      return;
+   if (o_str(on ? "\x1b[?1049h" : "\x1b[?1049l"))
+      g_alt = on;
+}
+
 /* After the banners (at connect, or after the login): what the session's mode starts with. */
 static void mode_start(void)
 {
@@ -996,6 +1010,8 @@ static void session_enter(uint8_t m)
       if (un != 0u)
          o_put(u, un);
    }
+   if (m != TND_MODE_SCREEN)
+      alt_screen(false);                        /* back to the normal screen, where the shell's lines are */
    if (m == TND_MODE_LINE) {
       tnd_line_reset(&g_lm, g_utf8, g_out.mode);
       g_lm_lit = false;
@@ -1024,6 +1040,7 @@ static void session_enter(uint8_t m)
       size_t  rn;
       o_str("\x1b[0m\r\n");
       g_ansi = ansi_now();
+      alt_screen(true);
       if (g_ansi)                                /* and checked against the Beeb's own screen */
          g_scan = g_out.sync && !tnd_out_blank(&g_out) ? SCAN_MERGE : SCAN_FULL;
       g_scan_wait = true;
@@ -1719,6 +1736,7 @@ static void telnetd_poll(uint32_t now_us, bool beeb_attached)
             o_str("\x1b[>q");                   /* XTVERSION: a real xterm can draw the Beeb's graphics */
          if (g_ansi) {
             uint8_t rb[TND_COPY_MAX];
+            alt_screen(true);
             size_t  rn = tnd_out_redraw(&g_out, rb); /* cleared, drawn row by row from the model ... */
             if (rn != 0u) {
                o_put(rb, rn);

@@ -41,8 +41,9 @@ ECHO, SGA = 1, 3
 class Screen:
     """A text screen fed with the ANSI the daemon produces, behaving as xterm does for every
     sequence the daemon sends: cursor moves (H A B C D G), erase (J K), the scroll region
-    (r, which also puts the cursor home), scrolling (S T, and ESC D / ESC M at the region's edge), colours and reverse video (m), and
-    the cursor shown or hidden (?25).  Each cell keeps its colours, for colour checks."""
+    (r, which also puts the cursor home), scrolling (S T, and ESC D / ESC M at the region's edge), colours and reverse video (m),
+    the cursor shown or hidden (?25), and the alternate screen (?1049: screen mode is drawn there, and the
+    normal screen with its cursor comes back when it ends).  Each cell keeps its colours, for colour checks."""
 
     def __init__(self, rows=25, cols=80):
         self.rows, self.cols = rows, cols
@@ -50,6 +51,15 @@ class Screen:
         self.cursor_on = True
         self.clear()
         self._esc = None
+        self._saved = None                      # the normal screen while the alternate one is shown
+
+    def _alt(self, on):
+        if on and self._saved is None:
+            self._saved = (self.grid, self.attr, self.lattr, self.r, self.c, self.top, self.bot)
+            self.clear()
+        elif not on and self._saved is not None:
+            self.grid, self.attr, self.lattr, self.r, self.c, self.top, self.bot = self._saved
+            self._saved = None
 
     def _blank(self):
         return [" "] * self.cols, [(7, 0, False)] * self.cols
@@ -131,6 +141,8 @@ class Screen:
         if params.startswith("?"):
             if params[1:] == "25":
                 self.cursor_on = final == "h"
+            elif params[1:] == "1049":
+                self._alt(final == "h")
             return
         nums = [int(p) if p.isdigit() else 0 for p in params.split(";")] if params else []
         n = nums[0] if nums and nums[0] else 1
@@ -346,6 +358,12 @@ def _selftest():
     s = Screen(3, 10)
     s.feed(b"ab\x08 \x08c")                      # the daemon's DELETE: back, blank, back
     assert s.text() == "ac", repr(s.text())
+    s = Screen(3, 10)
+    s.feed(b"shell\r\n>")
+    s.feed(b"\x1b[?1049h\x1b[1;1HBEEB")         # screen mode on the alternate screen
+    assert s.text() == "BEEB", repr(s.text())
+    s.feed(b"\x1b[?1049lX")                      # back: the normal screen and its cursor
+    assert s.text() == "shell\n>X", repr(s.text())
 
     # A fake daemon: greeting, login, a screen, and a reply to what is typed.
     import threading

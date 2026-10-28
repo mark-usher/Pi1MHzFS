@@ -215,6 +215,14 @@ What a program writes straight to screen memory does not appear, since the Pi
 only sees what goes through the MOS. The window of the terminal should be at
 least as large as the Beeb's screen for the positioning to look right.
 
+Screen mode is drawn on the terminal's alternate screen, as a full-screen program
+such as `vi` is: what scrolls off the Beeb's screen does not pile up in the
+terminal's scrollback, and the greeting and shell mode stay on the normal screen,
+which comes back as it was when you switch to shell mode. If the connection is cut
+off in screen mode the terminal stays on its alternate screen, as it does when such
+a program is; `reset` or `tput rmcup` in a Linux shell, or a new session in PuTTY,
+puts it back.
+
 ### MODE 7: teletext as the chip draws it
 
 In MODE 7 each row of the screen is drawn the way the Beeb's teletext chip (the

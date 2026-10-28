@@ -601,10 +601,12 @@ int main(int argc, char **argv)
    struct tcp_pcb *h = log_in(IP(10, 0, 0, 9));
    csend_n(h, NAWS_80x25, sizeof NAWS_80x25);
    tick(1200000u);
+   CHECK(got_has(h, "\x1b[?1049h"), "screen mode is drawn on the terminal's alternate screen");
    mark_at(h);
    csend(h, "\x1c" "m");
    tick(20000u);
    CHECK(got_has(h, "\r\n"), "Ctrl-\\ m: shell mode, on a new line");
+   CHECK(got_has(h, "\x1b[?1049l") && !got_has(h, "\x1b[?1049h"), "... back on the normal screen");
    {
       char b[512];
       telnetd_status(b, sizeof b);
@@ -650,8 +652,10 @@ int main(int argc, char **argv)
    csend(h, "\x1b[A");                           /* up: the history */
    tick(20000u);
    CHECK(got_has(h, "PRIN2 1"), "Up brings the last line back");
+   mark_at(h);
    csend(h, "\x1c" "m");
    tick(20000u);
+   CHECK(got_has(h, "\x1b[?1049h"), "Ctrl-\\ m again: the alternate screen again");
    {
       char b[512];
       telnetd_status(b, sizeof b);

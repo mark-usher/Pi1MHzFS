@@ -1041,11 +1041,16 @@ Three faults found and fixed:
 - ... and with that, a second cursor key that moves the copy cursor but not the block drew
   nothing (Left, Left showed the first only). Fixed, with a unit test.
 
+Changed after the test (Mark): screen mode is drawn on the terminal's alternate screen
+(`ESC [ ? 1049 h`), so what scrolled off or was cleared no longer piled up in PuTTY's
+scrollback; shell mode and the greeting stay on the normal screen (`ESC [ ? 1049 l` when
+screen mode ends). `beebterm.Screen` models both screens; the session tests and the
+harness (29 checks) pass.
+
 Left as they are: PuTTY's underline cursor is one pixel high whatever the font, much
 thinner than the Beeb's (a block cursor is the nearest PuTTY has; Windows Terminal's
-`vintage` cursor with a height would match); the cursor blinks only while PuTTY has the
-focus; and in screen mode what scrolls off or is cleared goes into PuTTY's scrollback (the
-daemon draws on the normal screen, not the alternate one).
+`vintage` cursor with a height would match); and the cursor blinks only while PuTTY has
+the focus.
 
 Not yet: Tube transfers in the harness (no disc there), and BREAK with the co-processor
 (F12 above was without a disc transfer running; a power cycle is not the same reset).
