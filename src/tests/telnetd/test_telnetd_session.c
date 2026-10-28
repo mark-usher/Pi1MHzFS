@@ -608,7 +608,21 @@ int main(int argc, char **argv)
    {
       char b[512];
       telnetd_status(b, sizeof b);
-      CHECK(strstr(b, "(shell mode)") != NULL, "the status says shell mode");
+      CHECK(strstr(b, "(shell mode, teletext rendered)") != NULL, "the status says shell mode, teletext rendered");
+   }
+   csend(h, "\x1c" "t");                        /* Ctrl-\ t: markers, and the status says so */
+   tick(20000u);
+   {
+      char b[512];
+      telnetd_status(b, sizeof b);
+      CHECK(strstr(b, "(shell mode, teletext markers)") != NULL, "Ctrl-\\ t: the status says markers");
+   }
+   csend(h, "\x1c" "t");                        /* and back */
+   tick(20000u);
+   {
+      char b[512];
+      telnetd_status(b, sizeof b);
+      CHECK(strstr(b, "(shell mode, teletext rendered)") != NULL, "Ctrl-\\ t again: rendered");
    }
    tick(200000u);                                /* a quiet Beeb */
    size_t ks = nkeys;
@@ -641,7 +655,7 @@ int main(int argc, char **argv)
    {
       char b[512];
       telnetd_status(b, sizeof b);
-      CHECK(strstr(b, "(shell mode)") == NULL && strstr(b, "(line mode)") == NULL, "Ctrl-\\ m again: screen mode");
+      CHECK(strstr(b, "(shell mode") == NULL && strstr(b, "(line mode)") == NULL, "Ctrl-\\ m again: screen mode");
    }
    cclose(h);
    tick(1200000u);

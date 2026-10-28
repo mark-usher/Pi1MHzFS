@@ -3537,10 +3537,13 @@ static void sh_edit(tnd_shell_t *s, uint8_t k, uint32_t now_us, tnd_sh_io_t *io)
       } else {
          uint8_t c = (uint8_t)(((unsigned)s->vhi << 4) | (unsigned)v);
          s->ctrlv = 0u;
-         if (tnd_key_for_char(c) != 0u || (c >= 0x80u && s->lit_ok))
+         if (tnd_key_for_char(c) != 0u || (c >= 0x80u && s->lit_ok)) {
             sh_insert(s, c);
-         else
+            sh_hide(s, io);                      /* shown at once, not with the next key */
+            sh_show(s, io);
+         } else {
             io_str(io, "\a");                    /* no key gives it: CHR$ in the program instead */
+         }
       }
       return;
    }

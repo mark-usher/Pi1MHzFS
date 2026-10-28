@@ -34,6 +34,7 @@ from beebterm import Screen                    # noqa: E402
 FIRMWARE = ["serial_redirect.c", "telnetd.c", "telnetd_proto.c", "net_telnet.c",
             os.path.join("lib", "textparse.c"), os.path.join("wifi", "lwip_util.c")]
 NAWS = lambda c, r: bytes([255, 250, 31, 0, c, 0, r, 255, 240])   # noqa: E731
+BLUE_MARK = b"\x1b[34m\xe2\x96\x88"            # &84 as a marker: a solid block in blue
 
 
 def find_rom(root, name):
@@ -223,10 +224,45 @@ def checks(roms):
     rig.type("RUN\r", per_key_ms=40, after_ms=500)
     rig.send("\x03", after_ms=1500)
     check("Ctrl-C stops a loop", "Escape at line" in rig.text(), rig.text())
+    rig.type("NEW\r", per_key_ms=40, after_ms=600)
+    rig.send("\x1ct", after_ms=300)
+    check("Ctrl-\\ t: markers, the status says so", "teletext markers" in rig.pi.status(), rig.pi.status())
+    rig.out = b""
+    rig.type('PRINT "', per_key_ms=40, after_ms=100)
+    rig.send("\x16" "84", after_ms=200)
+    check("Ctrl-V 84: its marker in the edit line at once", BLUE_MARK in rig.out, repr(rig.out))
+    rig.type('BLUE', per_key_ms=40, after_ms=100)
+    rig.send("\x16" "9D", after_ms=100)
+    rig.type('"', per_key_ms=40, after_ms=100)
+    rig.out = b""
+    rig.send("\r", after_ms=1200)
+    answer = rig.out.split(b"\r\n", 1)[-1]
+    check("markers in the output: a blue block, BLUE, a reversed B", BLUE_MARK + b"\x1b[39mBLUE\x1b[7mB\x1b[27m" in answer,
+          repr(rig.out))
+    show(rig, "markers", 3)
+    rig.send("\x1ct", after_ms=300)
+    rig.out = b""
+    rig.send("\x1b[A\r", after_ms=1200)
+    answer = rig.out.split(b"\r\n", 1)[-1]
+    check("Ctrl-\\ t again: rendered, the status says so", b"\x1b[0;34mBLUE" in answer and BLUE_MARK not in answer
+          and "teletext rendered" in rig.pi.status(), repr(rig.out) + "\n" + rig.pi.status())
     rig.send("\x1cm", after_ms=1500)
-    check("Ctrl-\\ m: back to screen mode", "(shell mode)" not in rig.pi.status(), rig.pi.status())
+    check("Ctrl-\\ m: back to screen mode", "(shell mode" not in rig.pi.status(), rig.pi.status())
     rig.type("NEW\r")
     rig.close()
+
+    print("== telnetd_teletext=markers: taken at the session's start")
+    rig.pi.cfg("telnetd_teletext", "markers")
+    rig.connect()
+    rig.send("\x1cm", after_ms=1500)
+    check("a new session in markers, the status says so", "teletext markers" in rig.pi.status(), rig.pi.status())
+    rig.out = b""
+    rig.type('PRINT CHR$132;"B";CHR$141;"D"\r', per_key_ms=30, after_ms=1200)
+    answer = rig.out.split(b"\r\n", 1)[-1]
+    check("a program's codes as markers", BLUE_MARK + b"\x1b[39mB\x1b[7m2\x1b[27mD" in answer, repr(rig.out))
+    rig.send("\x1cm", after_ms=1500)
+    rig.close()
+    rig.pi.cfg("telnetd_teletext", "rendered")
 
     print("== shell mode in a 20-column window: a line longer than the window")
     rig.connect(cols=20, rows=24)
@@ -247,7 +283,8 @@ def checks(roms):
     rig.send("\x1cm", after_ms=1200)
     rig.close()
 
-    print("== plain line mode: nc")
+    print("== plain line mode: nc (telnetd_teletext=markers, which is for shell mode only)")
+    rig.pi.cfg("telnetd_teletext", "markers")
     rig.connect(telnet=False)
     rig.screen = Screen(32, 80)
     rig.out = b""
@@ -267,6 +304,7 @@ def checks(roms):
     st = rig.pi.status()
     check("the status says line mode", "line mode" in st, st)
     rig.close()
+    rig.pi.cfg("telnetd_teletext", "rendered")
 
     print("== telnetd_linemode=on: no negotiation")
     rig2 = Rig(roms, {"telnetd_port": 23, "telnetd_login": 0, "telnetd_linemode": "on"})

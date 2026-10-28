@@ -2051,7 +2051,9 @@ void telnetd_status(char *buf, size_t len)
    if (g_pcb != NULL)
       used = (size_t)snprintf(buf, len, "port %u, %s%s%s from %s, %lu sessions, %lu refused, %lu replaced, %lu dropped, last end: %s",
                               (unsigned int)g_port, logged_in() ? "live" : "login", g_in.raw ? " (teletype)" : "",
-                              g_sm == TND_MODE_LINE ? " (line mode)" : g_sm == TND_MODE_SHELL ? " (shell mode)"
+                              g_sm == TND_MODE_LINE ? " (line mode)"
+                              : g_sm == TND_MODE_SHELL ? (g_ttx == TND_TTX_MARKERS ? " (shell mode, teletext markers)"
+                                                          : " (shell mode, teletext rendered)")
                               : g_sm == TND_MODE_UNDECIDED ? " (deciding)" : "", g_peer,
                               (unsigned long)g_sessions, (unsigned long)g_refused,
                               (unsigned long)g_replaced, (unsigned long)g_dropped, g_why);

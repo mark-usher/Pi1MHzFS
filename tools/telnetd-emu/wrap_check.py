@@ -1,6 +1,7 @@
 """wrap_check.py [cols] [rounds]: shell mode's edit line in a narrow terminal, the editor alone (shpipe.c with
 src/telnetd_proto.c, built here).  The Beeb prints a prompt; the editor takes a probe
-key (echoed), then random edits make lines longer than the terminal is wide.  After every key the terminal (beebterm's
+key (echoed), then random edits make lines longer than the terminal is wide, with teletext codes typed with
+Ctrl-V among them (each a one-cell marker, coloured or reversed).  After every key the terminal (beebterm's
 Screen, wrapping as xterm does) must show the prompt and the edit line laid out from the prompt across its rows, nothing
 else below, and the cursor where the editor's is.  Linux or WSL, Python 3 and gcc."""
 import os, random, subprocess, sys, tempfile
@@ -14,6 +15,7 @@ subprocess.check_call(["gcc", "-std=gnu2x", "-O1", "-I" + SRC, "-o", SHPIPE, os.
 COLS = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 ROUNDS = int(sys.argv[2]) if len(sys.argv) > 2 else 200
 LEFT, RIGHT, HOME, END, DEL, BS = 0x8C, 0x8D, 0xF7, 0x8B, 0xF6, 0x7F
+MARKS = {0x81: "█", 0x84: "█", 0x93: "▒", 0x8D: "2", 0x9D: "B", 0x88: "F"}   # code: its marker
 random.seed(7)
 fails = 0
 for rnd in range(ROUNDS):
@@ -23,9 +25,12 @@ for rnd in range(ROUNDS):
     steps = []
     for _ in range(random.randint(5, 60)):
         r = random.random()
-        if r < 0.55:
+        if r < 0.47:
             ch = random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ")
             cmds.append("k %02x" % ord(ch)); model.insert(cur, ch); cur += 1
+        elif r < 0.55:                           # Ctrl-V and two hex digits: a teletext code, a marker
+            code = random.choice(list(MARKS))
+            cmds += ["k 16"] + ["k %02x" % ord(h) for h in "%02X" % code]; model.insert(cur, MARKS[code]); cur += 1
         elif r < 0.65 and cur > 0:
             cmds.append("k %02x" % LEFT); cur -= 1
         elif r < 0.72 and cur < len(model):
@@ -64,5 +69,8 @@ for rnd in range(ROUNDS):
                 print("round %d prompt %r line %r cur %d" % (rnd, prompt, line, c))
                 print("  want", [r.rstrip() for r in want_rows], want_rc)
                 print("  got ", got, "rest", rest, got_rc)
+                if os.environ.get("WRAP_DEBUG"):
+                    print("  keys", " ".join(cmds[:n]))
+                    print("  out ", repr(out))
 print("cols %d: rounds %d, failures %d" % (COLS, ROUNDS, fails))
 sys.exit(1 if fails else 0)

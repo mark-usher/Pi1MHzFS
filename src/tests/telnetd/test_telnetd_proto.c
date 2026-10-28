@@ -2598,7 +2598,10 @@ static void test_shell_history(void)
 static void test_shell_ctrlv(void)
 {
    sedit_start("A");
-   STYPE("\x16" "81" "B" "\x16" "9d" "\x16" "zz");
+   nscli = 0;
+   STYPE("\x16" "81");
+   CHECK(scli_has("\x1b[31m\xe2\x96\x88\x1b[39m"), "Ctrl-V 81 shown at once, not with the next key"); if (!scli_has("\x1b[31m")) sdump();
+   STYPE("B" "\x16" "9d" "\x16" "zz");
    CHECK(sh.len == 4 && sh.line[1] == 0x81 && sh.line[2] == 'B' && sh.line[3] == 'z', "Ctrl-V 81: &81; &9D (no key gives it) and Ctrl-V z refused"); if (sh.len != 4) sdump();
    CHECK(scli_has("\a"), "with a bell");
    nscli = 0;
