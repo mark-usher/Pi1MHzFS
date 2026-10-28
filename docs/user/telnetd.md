@@ -347,8 +347,8 @@ BASIC's cursor editing has two cursors: the one where typing goes, and the copy
 cursor that the arrow keys move over the screen and End (COPY) copies from. The
 MOS moves the second one itself and never sends it down the serial line, so a
 terminal would show only the first. The daemon follows the arrow keys, End and
-RETURN and shows the two as the Beeb does: the terminal's cursor on the copy cursor,
-and a solid block (a reversed character) where typing goes. It moves them as COPY
+RETURN and shows the two as the Beeb does: the terminal's (flashing) cursor on the
+copy cursor, and a solid block (a reversed cell) where typing goes. It moves the copy cursor as COPY
 takes characters, as the MOS does, wrapping as the MOS's does: inside the text
 window, off the top to the bottom row and back, off either side to the other side of
 the row above or below. It moves only when the Beeb takes the key: the ROM tells the Pi each time a program takes a cursor key, COPY or RETURN out of
@@ -848,7 +848,7 @@ nowhere else, and keep telnet to a network you trust.
 | `telnetd_palette` | `1` | Sets the terminal's colours to the BBC's when a session starts (OSC 4, 10, 11 and 12), whatever colour scheme the terminal has: the eight colours at full strength, and black the same as the background, so cells the Beeb clears don't show. `0` leaves the terminal's colours alone. The terminal keeps them after the session; `tput reset` (Linux) or a new window puts yours back. |
 | `telnetd_separated` | `1` | MODE 7's separated graphics as Unicode 16's separated sextants; `0` sends them as contiguous ones, for a terminal font that doesn't have them. |
 | `telnetd_mode` | `7` | The Beeb's screen mode (0-7) until it sends a `MODE`. Its size cannot be read, and the daemon needs it to follow the text. |
-| `telnetd_copycursor` | `1` | `0` does not mark the copy cursor in the terminal. |
+| `telnetd_copycursor` | `1` | `0` does not show the copy cursor in the terminal (no cursor on it, no block where typing goes). |
 | `telnetd_tek` | `1` | Draw the Beeb's graphics in xterm's Tektronix window when the terminal says it is xterm; `0`: never. |
 | `telnetd_linemode` | `auto` | Screen or plain line mode for each connection, from what the client does: a telnet client gets screen mode, a client that does not answer telnet (`nc`) plain line mode. `shell`: the same, but a terminal starts in shell mode. `on`: always plain line mode, nothing negotiated (clean for `nc`). `off`: always screen mode, and Ctrl-\ is an ordinary key. |
 | `telnetd_teletext` | `rendered` | Teletext codes in shell mode: `rendered` (colours and graphics) or `markers` (each code shown in its column). Ctrl-\ t switches. |

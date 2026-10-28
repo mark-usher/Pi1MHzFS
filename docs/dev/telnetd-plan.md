@@ -1006,6 +1006,46 @@ found one fault in the test tools, not the daemon: `beebterm.Screen` dropped ESC
 ESC M, which the daemon sends to scroll inside the scroll region, so a check read the row
 above the answer; it models both now, with self-test checks.
 
-Not yet: PuTTY's own window (its keys: Home, End, Delete, the arrows, F12, Ctrl-\),
-Tube transfers in the harness (no disc there), and BREAK with the co-processor (nothing
-here presses BREAK; a power cycle is not the same reset).
+PuTTY's own window (0.85, on Windows 11), on the bench, compared with the Beeb's own
+screen (HDMI capture): the session `BBC Micro` from the kit (terminal type `xterm-bbc`, so
+`telnetd_font=bbc` drawing, BBC Micro MOS font, 80 x 32, UTF-8, Backspace sends DEL,
+cursor and keypad keys in normal mode, function keys `ESC [ n ~`, local echo and line
+editing on auto). Most keys went through a relay on the PC that passes the connection
+through untouched and can add keys to it; then Mark typed the keys in PuTTY's window and
+the relay's log showed what PuTTY sent. What PuTTY sends: the arrows `ESC [ A`-`D`, Home
+`ESC [ 1 ~`, End `ESC [ 4 ~`, Delete `ESC [ 3 ~`, Backspace 0x7F, F12 `ESC [ 24 ~`, Return
+CR LF (CR NUL after some keys), Ctrl-\ 0x1C, Ctrl-V 0x16, Ctrl-C 0x03; it says `XTERM-BBC`
+to TTYPE and sends NAWS at the start and on every resize.
+
+- Screen mode, all as the Beeb shows it: MODE 7 (colours, double height, mosaics, a
+  40-column wrap), MODE 0 and 3, a `LIST` of the demo disc's DEMO with scrolling, `CLS`,
+  `CHAIN "DEMO"` (the four-colour page, its scrolling text window, the hex dump) and
+  Ctrl-C stopping it ("Demo stopped"), copy editing with the arrows and End, Backspace
+  and Delete, Home (nothing), Ctrl-C, F12 (BREAK, the screen drawn again), and two
+  resizes (109 x 31, 104 x 33), each drawn again.
+- Shell mode (Ctrl-\ m and back): editing with the arrows, Home, End and Delete, history
+  up and down, a 108-character line and its 100-character answer wrapping, Ctrl-V codes
+  in MODE 7 (shown at once), Ctrl-\ t (the status page says rendered or markers; the
+  Beeb's output then shows each code as a coloured block), Ctrl-C ending a loop.
+
+Three faults found and fixed:
+- The kit's fonts had no code page in their OS/2 table and no Regular bit, so Windows' GDI
+  would not give them to PuTTY (which asks for the ANSI character set) and drew Courier
+  New: every MODE 7 character was a solid block and ASCII came out thin. The four fonts
+  now say Latin 1 and Regular (`make-fonts.py` too). Windows Terminal (DirectWrite) never
+  minded. An installed copy needs the kit's installer run again.
+- The copy cursor was shown the other way round from the Beeb: a reversed cell on it and
+  the terminal's cursor where typing goes. Now the terminal's (flashing) cursor is on the
+  copy cursor and a solid block where typing goes, as on the Beeb; the cursor is put back
+  before anything the Beeb prints (`tnd_out_unpark`).
+- ... and with that, a second cursor key that moves the copy cursor but not the block drew
+  nothing (Left, Left showed the first only). Fixed, with a unit test.
+
+Left as they are: PuTTY's underline cursor is one pixel high whatever the font, much
+thinner than the Beeb's (a block cursor is the nearest PuTTY has; Windows Terminal's
+`vintage` cursor with a height would match); the cursor blinks only while PuTTY has the
+focus; and in screen mode what scrolls off or is cleared goes into PuTTY's scrollback (the
+daemon draws on the normal screen, not the alternate one).
+
+Not yet: Tube transfers in the harness (no disc there), and BREAK with the co-processor
+(F12 above was without a disc transfer running; a power cycle is not the same reset).
