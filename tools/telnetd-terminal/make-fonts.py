@@ -201,8 +201,10 @@ def ttf(path, family, slots, advance):
                        "psName": ps + "-Regular"})
     panose = Panose()
     panose.bFamilyType, panose.bProportion = 2, 9                 # monospaced
+    # Latin 1 in the code page range and the Regular bit: without them Windows' GDI will not match the font for a
+    # program that asks for the ANSI character set (PuTTY does) and draws Courier New instead
     fb.setupOS2(sTypoAscender=960, sTypoDescender=-64, sTypoLineGap=0, usWinAscent=960, usWinDescent=64,
-                xAvgCharWidth=advance, fsType=0, panose=panose)
+                xAvgCharWidth=advance, fsType=0, panose=panose, fsSelection=0x40, ulCodePageRange1=1)
     fb.setupPost(isFixedPitch=1)
     stamp = timestampFromString("Fri Oct 23 00:00:00 2026")       # fixed, so the same tables give the same file
     fb.updateHead(created=stamp, modified=stamp)
