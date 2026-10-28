@@ -41,7 +41,7 @@ ECHO, SGA = 1, 3
 class Screen:
     """A text screen fed with the ANSI the daemon produces, behaving as xterm does for every
     sequence the daemon sends: cursor moves (H A B C D G), erase (J K), the scroll region
-    (r, which also puts the cursor home), scrolling (S T), colours and reverse video (m), and
+    (r, which also puts the cursor home), scrolling (S T, and ESC D / ESC M at the region's edge), colours and reverse video (m), and
     the cursor shown or hidden (?25).  Each cell keeps its colours, for colour checks."""
 
     def __init__(self, rows=25, cols=80):
@@ -97,6 +97,13 @@ class Screen:
                 elif len(self._esc) == 2 and ch in "#(":
                     pass
                 elif len(self._esc) == 2 and ch != "[":
+                    if ch == "D":                         # IND: down a row, scrolling the region at its bottom
+                        self._newline()
+                    elif ch == "M":                       # RI: up a row, scrolling the region down at its top
+                        if self.r == self.top:
+                            self._scroll_down()
+                        elif self.r > 0:
+                            self.r -= 1
                     self._esc = None
                 elif len(self._esc) > 2 and "@" <= ch <= "~":
                     self._csi(self._esc[2:-1], ch)
@@ -331,6 +338,11 @@ def _selftest():
     s = Screen(3, 10)
     s.feed(b"a\r\nb\r\nc\r\nd")                 # scrolls
     assert s.text() == "b\nc\nd", repr(s.text())
+    s = Screen(4, 10)
+    s.feed(b"a\r\nb\r\nc\r\nd\x1b[1;3r\x1b[3;1H\x1bD\x1b[r")   # IND at the region's bottom: rows 1-3 scroll
+    assert s.text() == "b\nc\n\nd", repr(s.text())
+    s.feed(b"\x1b[1;3r\x1b[1;1H\x1bM\x1b[r")     # RI at its top: rows 1-3 scroll down
+    assert s.text() == "\nb\nc\nd", repr(s.text())
     s = Screen(3, 10)
     s.feed(b"ab\x08 \x08c")                      # the daemon's DELETE: back, blank, back
     assert s.text() == "ac", repr(s.text())

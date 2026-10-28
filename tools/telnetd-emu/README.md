@@ -85,7 +85,8 @@ the editor's output of a failure.
 ## Not covered
 
 - Tube transfers from a filing system (`*LOAD` into the parasite, R3 and its NMIs): there
-  is no disc. The second processor's other languages and clients (the Z80, 32016, ARM
+  is no disc (checked on a real Beeb with a 6502 co-processor and a DFS floppy instead:
+  `docs/dev/telnetd-plan.md` section 17). The second processor's other languages and clients (the Z80, 32016, ARM
   ...), and its BREAK: nothing here presses BREAK.
 - The Beebium route of the earlier harness (`beebium_run.py`): Beebium 0.9.1 cannot map
   a device into FRED, and the real ROM looks for the stub at &FCCC, so the stub ran from

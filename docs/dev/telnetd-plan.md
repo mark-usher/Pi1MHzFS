@@ -995,5 +995,17 @@ about 75 s; with it (and HiBASIC 4): 39 in under 3 minutes. All pass. Nothing in
 changing for the second processor: its keys and the Beeb's output go through the host's
 MOS either way, and the stub at &FCCC stays hooked in.
 
+Tube transfers from a filing system, on the bench instead (its 6502 co-processor and the
+1770 DFS with a floppy in drive 0), in one Debian telnet session, 13 checks, all pass: in
+screen mode `*INFO *`, `LOAD` of a 6.4K BASIC program into the parasite (PAGE &800, TOP
+past it), `LIST`, and `*LOAD` of a 16K file to &3000 in the parasite (the ROM's title and
+language entry there); in shell mode `SAVE` from the parasite, `*INFO`, `LOAD` and `LIST`
+back, `CHAIN` (150 numbers and the last line), `*LOAD` to &3000, `*TYPE`, and `*DELETE`
+leaving the catalogue as it was. The daemon stays hooked through every transfer. The run
+found one fault in the test tools, not the daemon: `beebterm.Screen` dropped ESC D and
+ESC M, which the daemon sends to scroll inside the scroll region, so a check read the row
+above the answer; it models both now, with self-test checks.
+
 Not yet: PuTTY's own window (its keys: Home, End, Delete, the arrows, F12, Ctrl-\),
-and Tube transfers from a filing system in the harness (no disc there).
+Tube transfers in the harness (no disc there), and BREAK with the co-processor (nothing
+here presses BREAK; a power cycle is not the same reset).
