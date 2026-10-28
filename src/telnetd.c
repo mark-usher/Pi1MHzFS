@@ -990,6 +990,12 @@ static void session_enter(uint8_t m)
    g_sm = m;
    g_in.edit_keys = (m == TND_MODE_SHELL);      /* Home and Delete for the editor */
    g_hot = g_hot_lit = false;
+   if (m != TND_MODE_SCREEN && g_out.parked) {  /* the cursor off the copy cursor, back where the Beeb writes */
+      uint8_t u[TND_UNPARK_MAX];
+      size_t  un = tnd_out_unpark(&g_out, u);
+      if (un != 0u)
+         o_put(u, un);
+   }
    if (m == TND_MODE_LINE) {
       tnd_line_reset(&g_lm, g_utf8, g_out.mode);
       g_lm_lit = false;

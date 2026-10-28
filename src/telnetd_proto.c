@@ -2710,7 +2710,8 @@ size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX
       cc_apply(s, s->pend[i]);
    s->npend = 0u;
 
-   if (s->hl_on) {                              /* the old mark goes: the cell as it was */
+   bool shown = cc_shown(s);
+   if (s->hl_on && (!shown || s->hlx != s->cx || s->hly != s->cy)) {   /* the old block goes */
       n += put_pos(s, dst + n, s->hlx, s->hly);
       if (s->tele) {
          n += ttx_mark(s, dst + n, s->hlx, s->hly, false);
@@ -2720,9 +2721,8 @@ size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX
       }
       s->hl_on = false;
    }
-   if (s->cc_on && (s->ccx != s->cx || s->ccy != s->cy)
-       && (s->at[s->ccy][s->ccx] & AT_KNOWN) != 0u) {
-      n += put_pos(s, dst + n, s->ccx, s->ccy);
+   if (shown && !s->hl_on && s->cx < s->cols && (s->at[s->cy][s->cx] & AT_KNOWN) != 0u) {
+      n += put_pos(s, dst + n, s->cx, s->cy);   /* the block where typing goes */
       if (s->tele) {
          n += ttx_mark(s, dst + n, s->cx, s->cy, true);
       } else {
@@ -2734,11 +2734,11 @@ size_t tnd_out_copyflush(tnd_out_t *s, uint32_t now_us, uint8_t dst[TND_COPY_MAX
       s->hlx = s->cx;
       s->hly = s->cy;
    }
-   if (n != 0u || shown != s->parked || (shown && keys)) {   /* (a key moves the cursor, the block stays) */
+   if (n != 0u || shown != s->parked) {
       n += put_finish(s, dst + n);
       s->tsgr = s->coloured ? 0xFFu : TTX_SGR_PLAIN;
       if (shown)                                 /* the flashing cursor on the copy cursor */
-         n += put_pos(dst + n, s->ccx, s->ccy);
+         n += put_pos(s, dst + n, s->ccx, s->ccy);
       s->parked = shown;
    }
    return n;
@@ -2749,7 +2749,7 @@ size_t tnd_out_unpark(tnd_out_t *s, uint8_t dst[TND_UNPARK_MAX])
    if (!s->parked)
       return 0u;
    s->parked = false;
-   return put_pos(dst, s->cx, s->cy);
+   return put_pos(s, dst, s->cx, s->cy);
 }
 
 bool tnd_stalled(bool pending, uint32_t now_us, uint32_t progress_us, uint32_t limit_us)

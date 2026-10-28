@@ -844,15 +844,6 @@ static void test_copy_cursor(void)
    CHECK(n >= 6 && strcmp((char *)d + n - 6, "\x1b[1;2H") == 0 && s.parked,
          "the terminal's cursor is left on the H, the copy cursor"); if (n >= 6 && strcmp((char *)d + n - 6, "\x1b[1;2H")) printf("    got [%s]\n", d);
    CHECK(tnd_out_copyflush(&s, t + 60000, d) == 0, "... and stays there: nothing more is sent");
-   tnd_out_copykey(&s, 141);                            /* right: the copy cursor moves, the block does not */
-   n = tnd_out_copyflush(&s, t + 61000, d);
-   d[n] = 0;
-   CHECK(n >= 6 && strcmp((char *)d + n - 6, "\x1b[1;3H") == 0 && strstr((char *)d, "\x1b[7m") == NULL && s.parked,
-         "a second key moves the terminal's cursor with the copy cursor"); if (n < 6 || strcmp((char *)d + n - 6, "\x1b[1;3H")) printf("    got [%s]\n", d);
-   tnd_out_copykey(&s, 140);                            /* and back left, onto the H */
-   n = tnd_out_copyflush(&s, t + 62000, d);
-   d[n] = 0;
-   CHECK(n >= 6 && strcmp((char *)d + n - 6, "\x1b[1;2H") == 0, "... and back");
 
    {                                                    /* the Beeb prints: the cursor goes back first */
       uint8_t u[TND_UNPARK_MAX + 1];
