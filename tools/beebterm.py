@@ -19,6 +19,7 @@ As a module:
         print(b.screen_text())
 """
 import argparse
+import codecs
 import os
 import socket
 import sys
@@ -83,7 +84,9 @@ class Screen:
             self.r += 1
 
     def feed(self, data):
-        text = data.decode("utf-8", "replace")
+        if not hasattr(self, "_dec"):                    # incremental: a character split between two reads stays whole
+            self._dec = codecs.getincrementaldecoder("utf-8")("replace")
+        text = self._dec.decode(data)
         for ch in text:
             if self._esc is not None:
                 self._esc += ch

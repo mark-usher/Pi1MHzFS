@@ -289,7 +289,17 @@ static struct tcp_pcb *listener(u16_t port)
    return NULL;
 }
 
-static struct tcp_pcb *connect_from(u16_t port, uint32_t ip)
+static bool live(const struct tcp_pcb *c) { return !c->closed && !c->aborted; }
+
+static void csend_n(struct tcp_pcb *c, const void *d, size_t n)
+{
+   tr_bytes("<c", c->id, d, n);
+   if (c->recv != NULL && live(c))
+      (void)c->recv(c->arg, c, pbuf_make(d, n), ERR_OK);
+}
+
+/* A client that never answers telnet (nc, a script): the session decides on line mode. */
+static struct tcp_pcb *connect_raw_from(u16_t port, uint32_t ip)
 {
    struct tcp_pcb *l = listener(port), *c = tcp_new_ip_type(0u);
    c->remote_ip.addr = ip;
@@ -300,13 +310,15 @@ static struct tcp_pcb *connect_from(u16_t port, uint32_t ip)
    return c;
 }
 
-static bool live(const struct tcp_pcb *c) { return !c->closed && !c->aborted; }
-
-static void csend_n(struct tcp_pcb *c, const void *d, size_t n)
+/* A telnet client: on port 23 it answers the greeting at once (DO ECHO, DO SGA, WILL SGA), as telnet and
+   PuTTY do, so the session is a terminal's (screen mode). */
+static struct tcp_pcb *connect_from(u16_t port, uint32_t ip)
 {
-   tr_bytes("<c", c->id, d, n);
-   if (c->recv != NULL && live(c))
-      (void)c->recv(c->arg, c, pbuf_make(d, n), ERR_OK);
+   static const uint8_t answer[] = { 255, 253, 1, 255, 253, 3, 255, 251, 3 };
+   struct tcp_pcb *c = connect_raw_from(port, ip);
+   if (port == 23u)
+      csend_n(c, answer, sizeof answer);
+   return c;
 }
 static void csend(struct tcp_pcb *c, const char *s) { csend_n(c, s, strlen(s)); }
 
@@ -411,7 +423,9 @@ int main(int argc, char **argv)
    mark_at(c);
    tick(1200000u);
    CHECK(got_has(c, "\x1b[2J") || got_has(c, "\x1b[H"), "the terminal cleared and drawn");
-   CHECK(keys_have("\xff"), "the ROM asked for the screen (SCAN_KEY)");
+   CHECK(!keys_have("\xff"), "the check of the picture waits for a pause in the typing ...");
+   tick(2100000u);
+   CHECK(keys_have("\xff"), "... then the ROM is asked for the screen (SCAN_KEY)");
 
    step("the Beeb prints, the client types");
    mark_at(c);
@@ -551,6 +565,88 @@ int main(int argc, char **argv)
    beeb_prints("X");
    tick(31000000u);
    CHECK(s->aborted, "aborted after 30 s without progress");
+
+   step("line mode: a client that never answers telnet (nc)");
+   tick(2100000u);
+   struct tcp_pcb *n = connect_raw_from(23u, IP(10, 0, 0, 8));
+   mark_at(n);
+   tick(20000u);
+   CHECK(!got_has(n, "login: "), "nothing but the negotiation while deciding");
+   tick(800000u);
+   CHECK(got_has(n, "login: "), "no answer in 750 ms: line mode, the login prompt");
+   mark_at(n);
+   csend(n, "beeb\n");
+   tick(20000u);
+   CHECK(!got_has(n, "beeb"), "the user name not echoed (the client shows it)");
+   csend(n, "bench43\n");
+   tick(1200000u);
+   CHECK(!got_has(n, "connecting"), "no connecting phase");
+   {
+      char b[512];
+      telnetd_status(b, sizeof b);
+      CHECK(strstr(b, "(line mode)") != NULL, "the status says line mode");
+   }
+   mark_at(n);
+   csend(n, "PRINT 2+2\n");
+   tick(20000u);
+   CHECK(keys_have("PRINT 2+2\r"), "the line typed into the Beeb, LF as RETURN");
+   beeb_prints("PRINT 2+2\r\n         4\r\n>\x1f\x05\x03" "X");
+   tick(20000u);
+   CHECK(!got_has(n, "PRINT"), "the Beeb's echo of the line taken out");
+   CHECK(got_has(n, "         4\r\n>X"), "its output as plain text, VDU 31 dropped");
+   CHECK(!got_has(n, "\x1b"), "no escape codes");
+   cclose(n);
+   tick(1200000u);
+   CHECK(n->closed, "closed");
+
+   step("shell mode: the hot key, the probe, the edit line");
+   struct tcp_pcb *h = log_in(IP(10, 0, 0, 9));
+   csend_n(h, NAWS_80x25, sizeof NAWS_80x25);
+   tick(1200000u);
+   mark_at(h);
+   csend(h, "\x1c" "m");
+   tick(20000u);
+   CHECK(got_has(h, "\r\n"), "Ctrl-\\ m: shell mode, on a new line");
+   {
+      char b[512];
+      telnetd_status(b, sizeof b);
+      CHECK(strstr(b, "(shell mode)") != NULL, "the status says shell mode");
+   }
+   tick(200000u);                                /* a quiet Beeb */
+   size_t ks = nkeys;
+   csend(h, "P");
+   tick(20000u);
+   CHECK(nkeys == ks + 1u && keys[ks] == 'P', "the first key goes to the Beeb as a probe");
+   beeb_prints("P");                             /* echoed: a line editor reads */
+   tick(20000u);
+   CHECK(nkeys == ks + 2u && keys[ks + 1u] == 127u, "the editor takes over: a DELETE takes the probe back");
+   beeb_prints("\x7f");                         /* the DELETE's echo */
+   mark_at(h);
+   csend(h, "RINT 1");
+   tick(20000u);
+   CHECK(got_has(h, "RINT 1"), "the edit line shown as typed");
+   CHECK(nkeys == ks + 2u, "nothing more for the Beeb while editing");
+   csend(h, "\x1b[D\x1b[D\x7f" "2\r");        /* left, left, BACKSPACE (the T), 2 */
+   tick(20000u);
+   CHECK(keys_have("PRIN2 1\r"), "RETURN sends the edited line");
+   mark_at(h);
+   beeb_prints("PRIN2 1\r\nMistake\r\n>");
+   tick(200000u);                                /* and quiet again: an editing key opens the editor */
+   CHECK(!got_has(h, "PRIN2"), "the Beeb's echo of the line taken out");
+   CHECK(got_has(h, "Mistake"), "its output shown");
+   mark_at(h);
+   csend(h, "\x1b[A");                           /* up: the history */
+   tick(20000u);
+   CHECK(got_has(h, "PRIN2 1"), "Up brings the last line back");
+   csend(h, "\x1c" "m");
+   tick(20000u);
+   {
+      char b[512];
+      telnetd_status(b, sizeof b);
+      CHECK(strstr(b, "(shell mode)") == NULL && strstr(b, "(line mode)") == NULL, "Ctrl-\\ m again: screen mode");
+   }
+   cclose(h);
+   tick(1200000u);
 
    step("status");
    {

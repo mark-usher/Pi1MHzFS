@@ -178,7 +178,8 @@ power-on: a second copy in another bank answers the same reset call.
 | arrow keys | the cursor keys (the MOS's copy-cursor editing works) |
 | End | COPY (copies the character under the copy cursor) |
 | F1 to F9, F10 | f1 to f9, f0 |
-| SHIFT, CTRL or both with F1-F10, an arrow key or End | the same keys with SHIFT, CTRL or both, as the Beeb's keyboard gives them (`*FX4` and `*FX225-228` apply). Alt is ignored. |
+| SHIFT, CTRL or both with F1-F10, the arrow keys or End | the same keys with SHIFT, CTRL or both, as the Beeb's keyboard gives them (what they do is up to `*FX4` and `*FX225`-`228`, as on the Beeb) |
+| the pound sign from Windows' own telnet client | the Beeb's pound: Windows telnet types in the console's code page (850), which the daemon reads as such |
 | F12 | BREAK: a soft reset, the same jump as `CALL !-4`, so it works whatever is running. The terminal is cleared and the cursor put where the Beeb reports it; the session comes back when something hooks the daemon in again (HELPERS or the auto-start ROM). Boot banners printed before the hook are not shown. |
 | SHIFT-F12 | SHIFT-BREAK: a BREAK, and the Beeb is told SHIFT is held while it starts, so the filing system boots (`!BOOT`, as `*OPT 4` says). Needs the auto-start ROM. A boot that waits for ever (the DFS with no drive) can only be ended by the BREAK key or the power: see "Things to know". |
 | CTRL-F12 | CTRL-BREAK, as near as software can: a BREAK the MOS takes for a power-on (the MOS reads CTRL from the keyboard itself). The language and the BREAK intercept go back to their defaults as after CTRL-BREAK, but memory from &0400 is cleared too, and OSBYTE 253 says 1 (power-on), not 2. CTRL-SHIFT-F12 is the same. On a Master it also empties sideways RAM, TelnetD included: see "Things to know". |
@@ -222,9 +223,10 @@ changes the cells after it (or, for some, from its own cell). So you see:
 
 - **the colours**: alphanumeric and graphics colours, new background and black
   background, flash (as the terminal's blink) and conceal;
-- **the graphics**: each mosaic character as its block of six cells, using
-  Unicode's "sextant" characters, contiguous and separated alike, with hold
-  graphics;
+- **the graphics**: each mosaic character as its block of six cells, with hold
+  graphics. Contiguous graphics use Unicode's "sextant" characters, and separated
+  graphics Unicode 16's separated sextants (`telnetd_separated=0` sends them as
+  contiguous ones, for a terminal font that doesn't have them);
 - **the chip's own characters**: where the BBC has `£ ← ½ → ↑ # ― ¼ ‖ ¾ ÷` and a
   solid block instead of some ASCII ones, you see those;
 - **double height**: a row with a double height code is drawn as a double height
@@ -235,7 +237,8 @@ changes the cells after it (or, for some, from its own cell). So you see:
 A control code typed or printed in front of text that is already there changes how
 that text looks, just as on the Beeb. `COLOUR` does nothing in MODE 7, as on the
 Beeb. The sextants need a font with Unicode's "Symbols for Legacy Computing"
-(Cascadia Code, Windows Terminal's font, has them); a terminal that is not using UTF-8
+(Cascadia Code, Windows Terminal's font, has them), and the separated ones a font
+with Unicode 16's (the BBC Micro fonts in `tools/telnetd-terminal` have both); a terminal that is not using UTF-8
 (`telnetd_utf8=0`) gets the Latin-1 or nearest ASCII character instead, and `#`
 for a mosaic.
 
@@ -262,23 +265,31 @@ Any terminal works, but you can make your terminal look like the Beeb itself.
 `tools/telnetd-terminal` has fonts and settings that are ready to install, with the
 BBC's eight colours.
 
-The Beeb's characters change shape with the MODE, and a terminal cannot change its
-font when the Beeb does, so there is one font for each width of the screen:
-"BBC Micro Teletext" for MODE 7 (40 x 25, in the teletext chip's style), and
-"BBC Micro MOS", "BBC Micro MOS 40" and "BBC Micro MOS 20" for MODE 0/3, 1/4/6
-and 2/5 (80, 40 and 20 x 32, the MOS's own character set). Use the one for the
-mode you work in; the Beeb starts in MODE 7, so that is the default.
+The Beeb's characters change shape with the MODE, but a window keeps one font. So the
+kit gives you two ways to start:
 
-- **Windows Terminal**: run `windows\install.cmd` to install the fonts and a
-  profile for each mode. `windows\BBC-Micro-telnet.cmd [host] [mode]` then opens
-  a window of the right size. Windows' own telnet client cannot show UTF-8, which
-  the pound sign and the teletext graphics need. The profiles therefore use WSL's
-  telnet when you have one (`sudo apt install telnet` in Debian).
-- **PuTTY**: double-click `putty\BBC-Micro-telnet.reg` to add a saved session for
-  each mode. `windows\BBC-Micro-putty.cmd [host] [mode]` opens one.
+- **"BBC Micro"**: every MODE in its own shape in one 80 x 32 window in the
+  "BBC Micro MOS" font. The window says so with its terminal type, `xterm-bbc` (any
+  type with `bbc` in it), and the daemon then draws each character as one, two or
+  four of the font's pieces, and teletext double height without the double width.
+  That is the way to watch a program that changes MODE, such as the demo. MODE 7
+  uses the top 25 of the 32 rows, so its characters are shorter than on the Beeb.
+- **"BBC Micro MODE 7"**: 40 x 25 in the "BBC Micro Teletext" font, MODE 7 exactly;
+  the other MODEs show in that font.
+
+Any other terminal gets plain characters.
+
+- **Windows Terminal**: close all its windows and run `windows\install.cmd` to install
+  the fonts and both profiles. `windows\BBC-Micro-telnet.cmd [host] [7]` then opens
+  one. Windows' own telnet client cannot show UTF-8, which the pound sign and the
+  teletext graphics need. The profiles therefore use WSL's telnet when you have one
+  (`sudo apt install telnet` in Debian).
+- **PuTTY**: double-click `putty\BBC-Micro-telnet.reg` to add both saved sessions.
+  `windows\BBC-Micro-putty.cmd [host] [7]` opens one.
 - **Debian (bookworm, trixie)**: run `sh linux/install.sh`, then
-  `beeb-telnet [-m mode] [host]`. On the Linux console it loads that mode's console
-  font and the BBC's colours for the session.
+  `beeb-telnet [-m 7] [host]`. The Linux console has no room for the pieces, so there
+  `-m MODE` picks one MODE's console font, loaded with the BBC's colours for the
+  session.
 
 The host is `Pi1MHz` in all of them; use your Pi's hostname or IP address if it is
 different. The [README](../../tools/telnetd-terminal/README.md) explains each one.
@@ -404,9 +415,10 @@ RETURN does not:
   their codes, is the client's forwarding key), so paged mode works in line mode.
 - **Ctrl-C** is ESCAPE at once (the client's abort key). `send brk` at the
   `telnet>` prompt is BREAK, and `send ip` is ESC.
-- **Each line shows once.** The client echoes the line and starts a new one
-  itself when you press RETURN, so the screen is drawn again before the Beeb's own
-  echo of the line arrives, which then lands in its place.
+- **RETURN shows the screen again**: the client shows what you type itself and
+  goes to a new line (scrolling at the bottom), so an ANSI terminal is drawn again
+  from the Beeb's screen and the Beeb's own echo of the line lands in its place - in
+  the BBC font's shape for the MODE, too.
 - **Switching mode shows the screen again**: the client's `telnet>` prompt was
   over it. In teletype mode the Beeb's line is sent again instead - its prompt and
   what you had typed, however many rows it wraps over.
@@ -431,6 +443,17 @@ mode; PuTTY's "local line editing") send ESC and F12 only with the line. `send b
   telnet does) has its screen drawn again by the daemon, at once: no key is needed.
   Windows telnet reports its size only when it connects, so after resizing it press
   F11 (the message says so only to Windows telnet).
+
+- **Characters a program defines (VDU 23) are drawn as blocks** of their 8 x 8
+  bitmap, a block lit where a quarter or more of its dots are: with the BBC font
+  2 x 4 blocks in MODE 0 and 3, 4 x 4 in MODE 1, 4 and 6, 8 x 4 in MODE 2 and 5
+  (the font's pieces U+EA00-EAFF); without it 2 x 2, Unicode's quadrant blocks.
+  Codes 128-255 in MODE 0-6 are such characters, blank until a program defines
+  them, as on the Beeb (never MODE 7's colour codes there). The daemon keeps each
+  character's own definition, as the MOS does with a second processor; a Beeb
+  without one shares a definition between 128, 160, 192 and 224 until `*FX20`.
+  A redefined character already on the screen keeps its old shape on the Beeb
+  but takes the new one when the terminal is drawn again.
 
 - **ESC and Ctrl-C are the Beeb's ESCAPE key**, with the Beeb's own settings, as
   the keyboard's ESCAPE goes through the MOS (OSBYTE 153): it raises ESCAPE, so it
@@ -646,6 +669,9 @@ nowhere else, and keep telnet to a network you trust.
 | `telnetd_raw_port` | (none) | A second port for teletype mode with no telnet (PuTTY's Raw, `nc`): bytes as they are, both ways. |
 | `telnetd_ansi` | `1` | `0` sends the Beeb's output exactly as it is, with no ANSI. For a program that does its own VDU handling. |
 | `telnetd_utf8` | `1` | The pound sign as UTF-8; `0` sends it as Latin-1. |
+| `telnetd_font` | (none) | A terminal whose type has `bbc` in it (the kit's `xterm-bbc`) has the BBC Micro MOS font from `tools/telnetd-terminal` and is 80 x 32: every MODE is drawn in its own shape in that one window (a character as 1, 2 or 4 of the font's private-use pieces), and teletext double height as top and bottom pieces instead of the terminal's double-height lines. Any other terminal gets plain characters. `plain`: every terminal does. |
+| `telnetd_palette` | `1` | Sets the terminal's colours to the BBC's when a session starts (OSC 4, 10, 11 and 12), whatever colour scheme the terminal has: the eight colours at full strength, and black the same as the background, so cells the Beeb clears don't show. `0` leaves the terminal's colours alone. The terminal keeps them after the session; `tput reset` (Linux) or a new window puts yours back. |
+| `telnetd_separated` | `1` | MODE 7's separated graphics as Unicode 16's separated sextants; `0` sends them as contiguous ones, for a terminal font that doesn't have them. |
 | `telnetd_mode` | `7` | The Beeb's screen mode (0-7) until it sends a `MODE`. Its size cannot be read, and the daemon needs it to follow the text. |
 | `telnetd_copycursor` | `1` | `0` does not mark the copy cursor in the terminal. |
 | `telnetd_tek` | `1` | Draw the Beeb's graphics in xterm's Tektronix window when the terminal says it is xterm; `0`: never. |
