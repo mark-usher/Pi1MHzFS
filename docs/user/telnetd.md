@@ -178,7 +178,7 @@ power-on: a second copy in another bank answers the same reset call.
 | arrow keys | the cursor keys (the MOS's copy-cursor editing works) |
 | End | COPY (copies the character under the copy cursor) |
 | F1 to F9, F10 | f1 to f9, f0 |
-| SHIFT, CTRL or both with F1-F10, the arrow keys or End | the same keys with SHIFT, CTRL or both, as the Beeb's keyboard gives them (what they do is up to `*FX4` and `*FX225`-`228`, as on the Beeb) |
+| SHIFT, CTRL or both with F1-F10, an arrow key or End | the same keys with SHIFT, CTRL or both, as the Beeb's keyboard gives them (`*FX4` and `*FX225-228` apply). Alt is ignored. |
 | the pound sign from Windows' own telnet client | the Beeb's pound: Windows telnet types in the console's code page (850), which the daemon reads as such |
 | F12 | BREAK: a soft reset, the same jump as `CALL !-4`, so it works whatever is running. The terminal is cleared and the cursor put where the Beeb reports it; the session comes back when something hooks the daemon in again (HELPERS or the auto-start ROM). Boot banners printed before the hook are not shown. |
 | SHIFT-F12 | SHIFT-BREAK: a BREAK, and the Beeb is told SHIFT is held while it starts, so the filing system boots (`!BOOT`, as `*OPT 4` says). Needs the auto-start ROM. A boot that waits for ever (the DFS with no drive) can only be ended by the BREAK key or the power: see "Things to know". |
@@ -199,8 +199,8 @@ your terminal: `CLS` and `MODE` clear the screen, `TAB(x,y)` (VDU 31)
 positions the cursor, `COLOUR` sets the text and background colours, and DELETE
 rubs out a character. The parameter bytes of the VDU codes a terminal cannot
 show (palette, VDU 23) are swallowed, so they do not print as rubbish. In MODE
-0-6 the characters 128-255 are the ones a program defines with VDU 23; the
-terminal is not told their shapes, so they show as blanks. In the
+0-6 the characters 128-255 are the ones a program defines with VDU 23: blank
+until it does, then drawn as blocks of their shape (see "Things to know"). In the
 modes other than 7 `COLOUR` stays set from line to line, as on the Beeb. The
 colour numbers are the mode's own: in MODE 1 and 5
 `COLOUR 1`, `2` and `3` are red, yellow and white, in the two-colour modes `1` is

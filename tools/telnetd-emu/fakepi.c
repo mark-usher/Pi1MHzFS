@@ -65,6 +65,8 @@ uint32_t RPI_GetSystemTime(void) { return Pi1MHz_now_us; }
 /* The serial stream's other user, the modem: not run here. */
 void modem_reset(void) { }
 void modem_attach(void) { }
+void fb_edit_cursor_arm(void) { }               /* no framebuffer here: the redirector's copy-cursor hints */
+void fb_edit_cursor_keys_told(bool told) { (void)told; }
 
 /* ---- Pi1MHz.cfg and the network ------------------------------------------------------------ */
 #define CFG_MAX 32
